@@ -1,10 +1,10 @@
 {
-  "name": "usr-dreaming",
+  "name": "repo-dreaming",
   "owner": {
     "name": "golaraj"
   },
   "metadata": {
-    "description": "User-owned session dreaming plugins",
+    "description": "Repo-owned session dreaming plugins",
     "version": "1.0.2"
   },
   "plugins": [
