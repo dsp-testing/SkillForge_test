@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/github/copilot-agent-runtime/skill-forge/schemas.json",
+  "title": "Skill Forge artifact schemas",
+  "$defs": {
+    "remoteToolRow": {
+      "type": "object",
+      "required": ["session_id", "tool_name", "arguments_json"],
+      "properties": {
+        "session_id": { "type": ["string", "number"] },
+        "tool_call_id": { "type": ["string", "number", "null"] },
+        "tool_name": {
+          "enum": ["bash", "shell", "powershell", "edit", "create", "apply_patch"]
+        },
+        "arguments_json": { "type": ["string", "object"] },
+        "tool_complete_success": { "type": ["boolean", "number", "string", "null"] },
+        "result_content": { "type": ["string", "null"] },
+        "completed_at": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "trajectoryEvent": {
+      "type": "object",
+      "required": ["session_id", "event_type"],
+      "properties": {
+        "session_id": { "type": "string" },
+        "tool_call_id": { "type": ["string", "null"] },
+        "event_type": { "enum": ["command", "result", "cache"] },
+        "command": { "type": "string" },
+        "output": { "type": "string" },
+        "exit_code": { "type": "integer" },
+        "event_key": { "type": "string" },
+        "event_value": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "usagePattern": {
+      "type": "object",
+      "required": [
+        "tool_hash",
+        "script_path",
+        "script_content",
+        "usage_count",
+        "success_count",
+        "failure_count",
+        "tool_type",
+        "contexts",
+        "session_ids"
+      ],
+      "properties": {
+        "tool_hash": { "type": "string", "pattern": "^[a-f0-9]{12}$" },
+        "script_path": { "type": "string" },
+        "script_content": { "type": "string" },
+        "usage_count": { "type": "integer", "minimum": 0 },
+        "success_count": { "type": "integer", "minimum": 0 },
+        "failure_count": { "type": "integer", "minimum": 0 },
+        "first_used": { "type": ["string", "null"] },
+        "last_used": { "type": ["string", "null"] },
+        "tool_type": {
+          "enum": [
+            "api_interaction",
+            "data_processing",
+            "file_operations",
+            "testing",
+            "debugging",
+            "automation",
+            "utility"
+          ]
+        },
+        "contexts": { "type": "array", "items": { "type": "string" } },
+        "session_ids": { "type": "array", "items": { "type": "string" } },
+        "success_rate": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "candidateDocument": {
+      "type": "object",
+      "required": ["schemaVersion", "scope", "thresholds", "coverage", "usagePatterns", "candidates"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "scope": {
+          "type": "object",
+          "required": ["kind", "user", "repository", "branch", "limitSessions"],
+          "properties": {
+            "kind": { "const": "user_repo_branch" },
+            "user": { "type": "string" },
+            "repository": { "type": "string" },
+            "branch": { "type": "string" },
+            "limitSessions": { "const": 100 }
+          },
+          "additionalProperties": false
+        },
+        "thresholds": {
+          "type": "object",
+          "required": ["usageThreshold", "successThreshold"],
+          "properties": {
+            "usageThreshold": { "type": "integer", "minimum": 1 },
+            "successThreshold": { "type": "number", "minimum": 0, "maximum": 1 }
+          },
+          "additionalProperties": false
+        },
+        "coverage": { "type": "object" },
+        "usagePatterns": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/usagePattern" }
+        },
+        "candidates": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/usagePattern" }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

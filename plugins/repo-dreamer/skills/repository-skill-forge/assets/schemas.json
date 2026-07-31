@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/github/copilot-agent-runtime/repository-skill-forge/schemas.json",
+  "title": "Repository Skill Forge artifact schemas",
+  "$defs": {
+    "normalizedSessionDocument": {
+      "type": "object",
+      "required": ["schemaVersion", "scope", "coverage", "userDiversity", "sessions"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "scope": {
+          "type": "object",
+          "required": ["kind", "repository", "windowStart", "windowEnd", "limitSessions"],
+          "properties": {
+            "kind": { "const": "repository" },
+            "repository": { "type": "string" },
+            "windowStart": { "type": "string" },
+            "windowEnd": { "type": "string" },
+            "limitSessions": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        },
+        "coverage": { "type": "object" },
+        "userDiversity": { "$ref": "#/$defs/userDiversity" },
+        "sessions": { "type": "array", "items": { "type": "object" } }
+      },
+      "additionalProperties": false
+    },
+    "userDiversity": {
+      "type": "object",
+      "required": ["status", "reason"],
+      "properties": {
+        "status": { "const": "unknown" },
+        "reason": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "sanitizedPrimitive": {
+      "type": "object",
+      "required": ["evidenceKey", "fingerprint", "kind", "sessionId", "surface", "outcome", "sourceContentRetained"],
+      "properties": {
+        "evidenceKey": { "type": "string" },
+        "fingerprint": { "type": "string" },
+        "kind": { "enum": ["script", "command"] },
+        "sessionId": { "type": "string" },
+        "surface": { "enum": ["cli", "cca", "ccr"] },
+        "branchId": { "type": ["string", "null"] },
+        "branchCategory": { "enum": ["default", "other", "unknown"] },
+        "completedAt": { "type": ["string", "null"] },
+        "day": { "type": ["string", "null"] },
+        "refs": { "type": "array", "items": { "type": "object" } },
+        "pathFamilies": { "type": "array", "items": { "type": "string" } },
+        "outcome": { "enum": ["success", "failure", "unknown"] },
+        "exitCode": { "type": ["integer", "null"] },
+        "signature": { "type": "object" },
+        "commandTemplate": { "type": "string" },
+        "sourceContentRetained": { "const": false }
+      },
+      "additionalProperties": true
+    },
+    "candidateDocument": {
+      "type": "object",
+      "required": ["schemaVersion", "scope", "thresholds", "userDiversity", "coverage", "usagePatterns", "candidates"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "scope": {
+          "type": "object",
+          "required": ["kind", "repository", "asOf", "activeDays", "staleDays"],
+          "properties": {
+            "kind": { "const": "repository" },
+            "repository": { "type": "string" },
+            "asOf": { "type": "string" },
+            "activeDays": { "type": "integer", "minimum": 1 },
+            "staleDays": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        },
+        "thresholds": { "type": "object" },
+        "userDiversity": { "$ref": "#/$defs/userDiversity" },
+        "coverage": { "type": "object" },
+        "usagePatterns": { "type": "array", "items": { "type": "object" } },
+        "candidates": { "type": "array", "items": { "type": "object" } }
+      },
+      "additionalProperties": false
+    },
+    "state": {
+      "type": "object",
+      "required": ["schemaVersion", "scope", "cursor", "updatedAt", "evidenceLedger", "proposalHistory"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "scope": {
+          "type": "object",
+          "required": ["kind", "repository"],
+          "properties": {
+            "kind": { "const": "repository" },
+            "repository": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "cursor": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "evidenceLedger": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/sanitizedPrimitive" }
+        },
+        "proposalHistory": { "type": "object" }
+      },
+      "additionalProperties": false
+    }
+  }
+}
