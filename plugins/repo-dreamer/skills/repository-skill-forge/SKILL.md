@@ -44,7 +44,12 @@ Inputs:
 - `windowEnd`: exclusive UTC end of this run;
 - `overlapHours`: default `24`;
 - `initialBackfillDays`: default `30`;
-- `limitSessions`: default `500`;
+- `discoveryPageSize`: default `500`;
+- `sessionBatchSize`: default `100`;
+- `toolPageSize`: default `500`;
+- `maxRows`: default `1000`;
+- `maxArtifactBytes`: default `10000000`;
+- `minWindowMinutes`: default `15`;
 - `activeDays`: default `90`;
 - `staleDays`: default `180`;
 - `publicationPrBudget`: default `1`;
@@ -74,68 +79,162 @@ window start to `windowEnd - initialBackfillDays`. Otherwise set it to
 Never advance or replace durable state until every deterministic stage,
 proposal review, and publication-ledger update for the run has completed.
 
-### 2. Resolve the default branch and fetch bounded repository evidence
+### 2. Resolve the default branch and initialize bounded extraction
 
 Use GitHub MCP to resolve the default branch and its current SHA before
 sanitization. Record both in `scope.json`; the default branch name is used only
 to categorize evidence and is not copied into persistent branch metadata.
 
-Generate the SQL:
+Initialize the run-local extraction state:
 
 ```bash
-python3 "$SKILL_DIR/scripts/build-session-query.py" \
+python3 "$SKILL_DIR/scripts/extraction-controller.py" init \
+  --out "$RUN_DIR/extraction-state.json" \
+  --repository "$REPOSITORY" \
   --start "$WINDOW_START" \
   --end "$WINDOW_END" \
-  --limit-sessions "$LIMIT_SESSIONS" \
-  > "$RUN_DIR/session-query.sql"
+  --run-dir "$RUN_DIR" \
+  --discovery-page-size "$DISCOVERY_PAGE_SIZE" \
+  --session-batch-size "$SESSION_BATCH_SIZE" \
+  --tool-page-size "$TOOL_PAGE_SIZE" \
+  --max-rows "$MAX_ROWS" \
+  --max-artifact-bytes "$MAX_ARTIFACT_BYTES" \
+  --min-window-minutes "$MIN_WINDOW_MINUTES"
 ```
 
-Execute that SQL with `session_store_sql`, passing `repo: "$REPOSITORY"` to the
-tool. Save the returned rows array without rewriting values to
-`$RUN_DIR/remote-session-rows.json`.
+The extraction state is run-local and must not be promoted as durable Forge
+state. It records adaptive time partitions, keyset cursors, session batches,
+tool-page cursors, cumulative query, row, relevant-tool-call, and artifact-byte
+counters, retries, and terminal blockers.
 
-The query deliberately requests `limitSessions + 1`. Normalization fails closed
-when the extra session proves truncation. Narrow the window or raise the
-explicit limit; never derive candidates from silently incomplete evidence.
+### 3. Execute the adaptive extraction loop
 
-### 3. Normalize and derive primitives
+Ask the controller for one deterministic action:
 
 ```bash
+python3 "$SKILL_DIR/scripts/extraction-controller.py" next \
+  --state "$RUN_DIR/extraction-state.json" \
+  --out "$RUN_DIR/next-action.json"
+```
+
+When the action kind is `discovery`, `metadata`, `refs`, `files`, or
+`tool-calls`, execute its `sql` with `session_store_sql`, always passing
+`repo: "$REPOSITORY"`. Save the returned rows array exactly at the action's
+`outputPath`, then record success into a temporary state and atomically promote
+it:
+
+```bash
+python3 "$SKILL_DIR/scripts/extraction-controller.py" record-success \
+  --state "$RUN_DIR/extraction-state.json" \
+  --action "$RUN_DIR/next-action.json" \
+  --result "$ACTION_OUTPUT_PATH" \
+  --out "$RUN_DIR/extraction-state.next.json"
+```
+
+On a query timeout or upstream failure, use `record-failure` with a concise
+reason instead. Retry action identities include page size and retry generation,
+so reducing a page cannot collide with the failed action it replaces. The
+controller recursively splits discovery time windows, splits session batches,
+then reduces single-session tool-page sizes. If a single-session,
+single-tool-page unit still fails, the run is blocked. Never skip the unit or
+advance beyond it.
+
+Every paged query requests `limit + 1`; the extra row proves more pages exist
+and is not consumed in the current page. Session metadata, refs, touched files,
+and tool calls are separate bounded queries so no correlated child-table
+aggregation can dominate a small session batch. Tool queries include only
+Forge-relevant calls (`bash`, `shell`, `powershell`, `create`, `edit`, and
+`apply_patch`) and latest completion records for those calls. Do not fetch
+turns, assistant messages, unrelated tool calls, or full event streams.
+
+Every query must also carry a source-time floor and ceiling. Discovery uses the
+overlap condition on `updated_at`; after metadata is loaded, child queries use
+the earliest actual session `created_at` in the batch as their floor and the
+latest actual session `updated_at` plus one minute, capped by the partition end,
+as their ceiling. Apply those bounds directly to
+`session_refs.created_at`, `session_files.first_seen_at`, and
+`events.timestamp`. Because `tool_requests` has no timestamp, join it through
+the exact batch IDs in a `sessions` target that is bounded by `created_at`.
+`LIMIT` is only an output bound and never substitutes for time-based source
+pruning.
+
+Temporary-file transport may be used when a successful tool response is too
+large for the conversation. It does not fix database-execution timeouts; those
+must go through adaptive subdivision.
+
+Repeat until the controller returns `{"kind":"done","status":"complete"}`. A
+blocked artifact may be produced only when the controller returns
+`{"kind":"done","status":"blocked","blocker":{...}}` and the extraction state
+has both `status: "blocked"` and a non-empty terminal blocker.
+
+### 4. Normalize, derive, sanitize, and checkpoint each batch
+
+For each completed extraction batch, normalize its metadata artifact and all
+accepted tool-page artifacts:
+
+```bash
+TOOL_ARGS=()
+for path in "${TOOL_PAGE_PATHS[@]}"; do
+  TOOL_ARGS+=(--tool-in "$path")
+done
+REF_ARGS=()
+for path in "${REF_PAGE_PATHS[@]}"; do
+  REF_ARGS+=(--refs-in "$path")
+done
+FILE_ARGS=()
+for path in "${FILE_PAGE_PATHS[@]}"; do
+  FILE_ARGS+=(--files-in "$path")
+done
+
 python3 "$SKILL_DIR/scripts/normalize-sessions.py" \
-  --in "$RUN_DIR/remote-session-rows.json" \
-  --out "$RUN_DIR/normalized-sessions.json" \
+  --metadata-in "$METADATA_PATH" \
+  "${REF_ARGS[@]}" \
+  "${FILE_ARGS[@]}" \
+  "${TOOL_ARGS[@]}" \
+  --out "$BATCH_DIR/normalized-sessions.json" \
   --repository "$REPOSITORY" \
   --window-start "$WINDOW_START" \
   --window-end "$WINDOW_END" \
-  --limit-sessions "$LIMIT_SESSIONS"
+  --limit-sessions "$SESSION_BATCH_SIZE"
 
 python3 "$SKILL_DIR/scripts/derive-primitives.py" \
-  --in "$RUN_DIR/normalized-sessions.json" \
-  --out "$RUN_DIR/primitives.raw.json"
-```
+  --in "$BATCH_DIR/normalized-sessions.json" \
+  --out "$BATCH_DIR/primitives.raw.json"
 
-Normalization covers CLI, CCA, and CCR but does not assume identical success
-signals. Shell outcomes are scored only when an explicit process exit code is
-present. Tool completion alone does not prove process success.
-
-Each primitive is keyed by session, tool call, fingerprint, and timestamp so an
-overlap-window replay does not double-count it. Repeated executions within one
-session remain one distinct-session contribution.
-
-### 4. Sanitize before persistence or semantic processing
-
-```bash
 python3 "$SKILL_DIR/scripts/sanitize-evidence.py" \
-  --in "$RUN_DIR/primitives.raw.json" \
-  --out "$RUN_DIR/primitives.sanitized.json" \
-  --report "$RUN_DIR/leakage-report.json" \
+  --in "$BATCH_DIR/primitives.raw.json" \
+  --out "$BATCH_DIR/primitives.sanitized.json" \
+  --report "$BATCH_DIR/leakage-report.json" \
   --main-branch "$DEFAULT_BRANCH"
+
+LEDGER_ARGS=()
+if [[ -f "$RUN_DIR/primitives.sanitized.json" ]]; then
+  LEDGER_ARGS=(--ledger-in "$RUN_DIR/primitives.sanitized.json")
+fi
+python3 "$SKILL_DIR/scripts/merge-sanitized-primitives.py" \
+  "${LEDGER_ARGS[@]}" \
+  --batch "$BATCH_ID" "$BATCH_DIR/primitives.sanitized.json" \
+  --out "$RUN_DIR/primitives.sanitized.next.json"
 ```
 
 Stop on every blocking finding. Raw command and script content may exist only in
 ephemeral pre-sanitization artifacts. Persistent evidence and model inputs must
 not retain source script bodies. Never author a skill by copying a session
 script verbatim.
+
+Atomically promote the sanitized ledger before deleting raw query, normalized,
+or unsanitized batch artifacts. The merge is idempotent by batch ID and
+`evidenceKey`, so resuming an interrupted run cannot double-count evidence.
+
+Normalization covers CLI, CCA, and CCR but does not assume identical success
+signals. Shell outcomes are scored only when an explicit process exit code is
+present. Tool completion alone does not prove process success. Tool calls are
+ordered by completion timestamp so script-producing edits are available before
+later shell execution.
+
+Each primitive is keyed by session, tool call, fingerprint, and timestamp so an
+overlap-window replay does not double-count it. Repeated executions within one
+session remain one distinct-session contribution.
 
 ### 5. Resolve mainline corroboration through GitHub MCP
 
@@ -317,7 +416,8 @@ evidence, silently advance the cursor, or report a PR that was not created.
 
 - Repo-scoped stores may expose different outcome detail for CLI, CCA, and CCR.
 - Late events require an overlap window, but stable evidence keys prevent double counting.
-- A busy repository may require narrower windows rather than a silently larger query.
+- A busy repository may require narrower time partitions, smaller session batches,
+  or smaller tool pages rather than a silently larger query.
 - Merged PR status must be resolved through GitHub MCP after session normalization.
 - Old evidence remains rebuildable but stops contributing after the stale window.
 - A qualified candidate can remain queued when another proposal consumes the PR budget.
@@ -326,9 +426,12 @@ evidence, silently advance the cursor, or report a PR that was not created.
 ## Assets and scripts
 
 - `scripts/build-session-query.py`: generate bounded repo-scoped evidence SQL.
+- `scripts/session_queries.py`: shared discovery, metadata, and relevant-tool SQL builders.
+- `scripts/extraction-controller.py`: plan, subdivide, and checkpoint bounded extraction.
 - `scripts/normalize-sessions.py`: normalize CLI, CCA, and CCR query rows.
 - `scripts/derive-primitives.py`: derive stable command and script fingerprints.
 - `scripts/sanitize-evidence.py`: redact personal paths and fail on secret-shaped data.
+- `scripts/merge-sanitized-primitives.py`: idempotently checkpoint sanitized batch evidence.
 - `scripts/aggregate-primitives.py`: merge state, deduplicate overlap, and score candidates.
 - `scripts/validate-candidates.py`: validate confidence and raw-evidence invariants.
 - `scripts/validate-clusters.py`: enforce exact candidate partitioning by subject.

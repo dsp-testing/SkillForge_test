@@ -1,0 +1,598 @@
+#!/usr/bin/env python3
+# Copyright (c) Microsoft Corporation. All rights reserved.
+
+"""Plan and checkpoint adaptive repository Skill Forge extraction."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import timedelta
+from pathlib import Path
+from typing import Any
+
+from forge_common import parse_timestamp, read_json, stable_hash, timestamp_text, write_json
+from session_queries import (
+    build_discovery_query,
+    build_files_query,
+    build_metadata_query,
+    build_refs_query,
+    build_tool_calls_query,
+)
+
+
+def partition_id(start: str, end: str) -> str:
+    return stable_hash({"start": start, "end": end}, 12)
+
+
+def batch_id(session_ids: list[str]) -> str:
+    return stable_hash(session_ids, 12)
+
+
+def initialize(args: argparse.Namespace) -> dict[str, Any]:
+    if parse_timestamp(args.start) >= parse_timestamp(args.end):
+        raise ValueError("--start must be before --end")
+    if args.tool_page_size > args.max_rows or args.discovery_page_size > args.max_rows:
+        raise ValueError("page sizes must not exceed --max-rows")
+    return {
+        "schemaVersion": 1,
+        "scope": {
+            "kind": "repository",
+            "repository": args.repository,
+            "windowStart": args.start,
+            "windowEnd": args.end,
+        },
+        "runDir": str(Path(args.run_dir).resolve()),
+        "limits": {
+            "discoveryPageSize": args.discovery_page_size,
+            "sessionBatchSize": args.session_batch_size,
+            "toolPageSize": args.tool_page_size,
+            "maxRows": args.max_rows,
+            "maxArtifactBytes": args.max_artifact_bytes,
+            "minWindowMinutes": args.min_window_minutes,
+        },
+        "partitions": [
+            {
+                "partitionId": partition_id(args.start, args.end),
+                "start": args.start,
+                "end": args.end,
+                "status": "discovering",
+                "discoveryComplete": False,
+                "discoveryCursor": None,
+                "sessions": [],
+                "batches": [],
+            }
+        ],
+        "retryHistory": [],
+        "blockers": [],
+        "handledActionIds": [],
+        "workCounters": {
+            "queryAttempts": 0,
+            "successfulQueries": 0,
+            "failedQueries": 0,
+            "rows": 0,
+            "toolCalls": 0,
+            "artifactBytes": 0,
+        },
+        "status": "running",
+    }
+
+
+def artifact_path(state: dict[str, Any], action_id: str) -> str:
+    return str(Path(state["runDir"]) / "extraction" / f"{action_id}.json")
+
+
+def action_generation(batch: dict[str, Any], stage: str) -> int:
+    return int(batch.get("retryGenerations", {}).get(stage, 0))
+
+
+def paged_action_id(kind: str, batch: dict[str, Any], page: int) -> str:
+    return (
+        f"{kind}-{batch['batchId']}-{page}"
+        f"-p{batch['pageSize']}-r{action_generation(batch, kind)}"
+    )
+
+
+def validate_state_invariants(state: dict[str, Any]) -> None:
+    status = state.get("status")
+    blockers = state.get("blockers", [])
+    if status == "blocked" and not blockers:
+        raise ValueError("blocked extraction state requires a terminal blocker")
+    if blockers and status != "blocked":
+        raise ValueError("terminal blockers require blocked extraction status")
+
+
+def work_counters(state: dict[str, Any]) -> dict[str, int]:
+    return state.setdefault(
+        "workCounters",
+        {
+            "queryAttempts": 0,
+            "successfulQueries": 0,
+            "failedQueries": 0,
+            "rows": 0,
+            "toolCalls": 0,
+            "artifactBytes": 0,
+        },
+    )
+
+
+def next_action(state: dict[str, Any]) -> dict[str, Any] | None:
+    validate_state_invariants(state)
+    if state.get("status") != "running":
+        return None
+    limits = state["limits"]
+    for partition in state["partitions"]:
+        for batch in partition["batches"]:
+            if batch["status"] == "metadata":
+                action_id = f"metadata-{batch['batchId']}"
+                return {
+                    "actionId": action_id,
+                    "kind": "metadata",
+                    "partitionId": partition["partitionId"],
+                    "batchId": batch["batchId"],
+                    "outputPath": artifact_path(state, action_id),
+                    "sql": build_metadata_query(session_ids=batch["sessionIds"]),
+                }
+            if batch["status"] == "refs":
+                page = len(batch["refsArtifacts"])
+                action_id = paged_action_id("refs", batch, page)
+                return {
+                    "actionId": action_id,
+                    "kind": "refs",
+                    "partitionId": partition["partitionId"],
+                    "batchId": batch["batchId"],
+                    "limit": batch["pageSize"],
+                    "outputPath": artifact_path(state, action_id),
+                    "sql": build_refs_query(
+                        session_ids=batch["sessionIds"],
+                        start=batch["sourceStart"],
+                        end=batch["sourceEnd"],
+                        limit=batch["pageSize"],
+                        cursor=batch.get("refsCursor"),
+                    ),
+                }
+            if batch["status"] == "files":
+                page = len(batch["filesArtifacts"])
+                action_id = paged_action_id("files", batch, page)
+                return {
+                    "actionId": action_id,
+                    "kind": "files",
+                    "partitionId": partition["partitionId"],
+                    "batchId": batch["batchId"],
+                    "limit": batch["pageSize"],
+                    "outputPath": artifact_path(state, action_id),
+                    "sql": build_files_query(
+                        session_ids=batch["sessionIds"],
+                        start=batch["sourceStart"],
+                        end=batch["sourceEnd"],
+                        limit=batch["pageSize"],
+                        cursor=batch.get("filesCursor"),
+                    ),
+                }
+            if batch["status"] == "tools":
+                cursor = batch.get("toolCursor") or {}
+                page = len(batch["toolArtifacts"])
+                action_id = paged_action_id("tools", batch, page)
+                return {
+                    "actionId": action_id,
+                    "kind": "tool-calls",
+                    "partitionId": partition["partitionId"],
+                    "batchId": batch["batchId"],
+                    "limit": batch["pageSize"],
+                    "outputPath": artifact_path(state, action_id),
+                    "sql": build_tool_calls_query(
+                        session_ids=batch["sessionIds"],
+                        start=batch["sourceStart"],
+                        end=batch["sourceEnd"],
+                        limit=batch["pageSize"],
+                        after_session_id=cursor.get("sessionId"),
+                        after_tool_call_id=cursor.get("toolCallId"),
+                    ),
+                }
+        if not partition["discoveryComplete"]:
+            cursor = partition.get("discoveryCursor") or {}
+            action_id = f"discover-{partition['partitionId']}-{len(partition['sessions'])}"
+            return {
+                "actionId": action_id,
+                "kind": "discovery",
+                "partitionId": partition["partitionId"],
+                "limit": limits["discoveryPageSize"],
+                "outputPath": artifact_path(state, action_id),
+                "sql": build_discovery_query(
+                    start=partition["start"],
+                    end=partition["end"],
+                    limit=limits["discoveryPageSize"],
+                    after_updated_at=cursor.get("updatedAt"),
+                    after_session_id=cursor.get("sessionId"),
+                ),
+            }
+        partition["status"] = "complete"
+    state["status"] = "complete"
+    return None
+
+
+def find_partition(state: dict[str, Any], partition_id_value: str) -> dict[str, Any]:
+    for partition in state["partitions"]:
+        if partition["partitionId"] == partition_id_value:
+            return partition
+    raise ValueError(f"unknown partition: {partition_id_value}")
+
+
+def find_batch(partition: dict[str, Any], batch_id_value: str) -> dict[str, Any]:
+    for batch in partition["batches"]:
+        if batch["batchId"] == batch_id_value:
+            return batch
+    raise ValueError(f"unknown batch: {batch_id_value}")
+
+
+def make_batches(session_ids: list[str], size: int, tool_page_size: int) -> list[dict[str, Any]]:
+    return [
+        {
+            "batchId": batch_id(group),
+            "sessionIds": group,
+            "status": "metadata",
+            "metadataArtifact": None,
+            "sourceStart": None,
+            "sourceEnd": None,
+            "refsArtifacts": [],
+            "refsCursor": None,
+            "filesArtifacts": [],
+            "filesCursor": None,
+            "toolArtifacts": [],
+            "toolCursor": None,
+            "pageSize": tool_page_size,
+            "retryGenerations": {
+                "refs": 0,
+                "files": 0,
+                "tools": 0,
+            },
+        }
+        for offset in range(0, len(session_ids), size)
+        if (group := session_ids[offset : offset + size])
+    ]
+
+
+def validate_result(
+    state: dict[str, Any],
+    action: dict[str, Any],
+    result_path: str,
+) -> tuple[list[Any], int]:
+    path = Path(result_path)
+    artifact_bytes = path.stat().st_size
+    if artifact_bytes > state["limits"]["maxArtifactBytes"]:
+        raise OverflowError("artifact_bytes_exceeded")
+    rows = read_json(path)
+    if not isinstance(rows, list):
+        raise ValueError("query result must be a JSON array")
+    if len(rows) > state["limits"]["maxRows"]:
+        raise OverflowError("row_limit_exceeded")
+    if action["kind"] in {"discovery", "refs", "files", "tool-calls"} and len(rows) > action["limit"] + 1:
+        raise ValueError("query returned more rows than its limit sentinel")
+    return rows, artifact_bytes
+
+
+def record_attempt(
+    state: dict[str, Any],
+    *,
+    rows: int = 0,
+    tool_calls: int = 0,
+    artifact_bytes: int = 0,
+) -> None:
+    counters = work_counters(state)
+    counters["queryAttempts"] += 1
+    counters["rows"] += rows
+    counters["toolCalls"] += tool_calls
+    counters["artifactBytes"] += artifact_bytes
+
+
+def record_success(
+    state: dict[str, Any],
+    action: dict[str, Any],
+    result_path: str,
+) -> None:
+    if action["actionId"] in state["handledActionIds"]:
+        return
+    artifact_bytes = Path(result_path).stat().st_size
+    record_attempt(state, artifact_bytes=artifact_bytes)
+    rows, _ = validate_result(state, action, result_path)
+    counters = work_counters(state)
+    counters["rows"] += len(rows)
+    if action["kind"] == "tool-calls":
+        counters["toolCalls"] += len(rows)
+    counters["successfulQueries"] += 1
+    partition = find_partition(state, action["partitionId"])
+    if action["kind"] == "discovery":
+        accepted = rows[: action["limit"]]
+        partition["sessions"].extend(accepted)
+        session_ids = [str(row["session_id"]) for row in accepted]
+        partition["batches"].extend(
+            make_batches(
+                session_ids,
+                state["limits"]["sessionBatchSize"],
+                state["limits"]["toolPageSize"],
+            )
+        )
+        if len(rows) > action["limit"]:
+            last = accepted[-1]
+            partition["discoveryCursor"] = {
+                "updatedAt": last["updated_at"],
+                "sessionId": last["session_id"],
+            }
+            partition["status"] = "extracting"
+            state["handledActionIds"].append(action["actionId"])
+            return
+        partition["discoveryComplete"] = True
+        partition["status"] = "extracting" if partition["batches"] else "complete"
+        state["handledActionIds"].append(action["actionId"])
+        return
+
+    batch = find_batch(partition, action["batchId"])
+    if action["kind"] == "metadata":
+        expected = set(batch["sessionIds"])
+        actual = {str(row.get("session_id")) for row in rows if isinstance(row, dict)}
+        if actual != expected:
+            raise ValueError("metadata result does not exactly cover the session batch")
+        created_at_values = [
+            str(row.get("created_at"))
+            for row in rows
+            if isinstance(row, dict) and row.get("created_at")
+        ]
+        updated_at_values = [
+            str(row.get("updated_at"))
+            for row in rows
+            if isinstance(row, dict) and row.get("updated_at")
+        ]
+        if len(created_at_values) != len(rows) or len(updated_at_values) != len(rows):
+            raise ValueError("metadata result requires created_at and updated_at for every session")
+        batch["metadataArtifact"] = result_path
+        batch["sourceStart"] = min(created_at_values, key=parse_timestamp)
+        latest_update = max(updated_at_values, key=parse_timestamp)
+        batch["sourceEnd"] = timestamp_text(
+            min(
+                parse_timestamp(partition["end"]),
+                parse_timestamp(latest_update) + timedelta(minutes=1),
+            )
+        )
+        batch["status"] = "refs"
+        state["handledActionIds"].append(action["actionId"])
+        return
+
+    accepted = rows[: action["limit"]]
+    if accepted:
+        accepted_path = str(
+            Path(state["runDir"]) / "extraction" / f"{action['actionId']}.accepted.json"
+        )
+        write_json(accepted_path, accepted)
+        artifact_key = {
+            "refs": "refsArtifacts",
+            "files": "filesArtifacts",
+            "tool-calls": "toolArtifacts",
+        }[action["kind"]]
+        batch[artifact_key].append(accepted_path)
+    if len(rows) > action["limit"]:
+        last = accepted[-1]
+        if action["kind"] == "refs":
+            batch["refsCursor"] = {
+                "sessionId": last["session_id"],
+                "turnIndex": last["turn_index"],
+                "refType": last["ref_type"],
+                "refValue": last["ref_value"],
+            }
+        elif action["kind"] == "files":
+            batch["filesCursor"] = {
+                "sessionId": last["session_id"],
+                "turnIndex": last["turn_index"],
+                "filePath": last["file_path"],
+                "toolName": last["tool_name"],
+            }
+        else:
+            batch["toolCursor"] = {
+                "sessionId": last["session_id"],
+                "toolCallId": last["tool_call_id"],
+            }
+        state["handledActionIds"].append(action["actionId"])
+        return
+    if action["kind"] == "refs":
+        batch["status"] = "files"
+    elif action["kind"] == "files":
+        batch["status"] = "tools"
+    else:
+        batch["status"] = "complete"
+    if partition["discoveryComplete"] and all(
+        item["status"] == "complete" for item in partition["batches"]
+    ):
+        partition["status"] = "complete"
+    state["handledActionIds"].append(action["actionId"])
+
+
+def split_partition(state: dict[str, Any], partition: dict[str, Any], reason: str) -> bool:
+    start = parse_timestamp(partition["start"])
+    end = parse_timestamp(partition["end"])
+    if end - start <= timedelta(minutes=state["limits"]["minWindowMinutes"]):
+        return False
+    midpoint = start + (end - start) / 2
+    midpoint_text = timestamp_text(midpoint)
+    children = [
+        {
+            "partitionId": partition_id(partition["start"], midpoint_text),
+            "start": partition["start"],
+            "end": midpoint_text,
+            "status": "discovering",
+            "discoveryComplete": False,
+            "discoveryCursor": None,
+            "sessions": [],
+            "batches": [],
+        },
+        {
+            "partitionId": partition_id(midpoint_text, partition["end"]),
+            "start": midpoint_text,
+            "end": partition["end"],
+            "status": "discovering",
+            "discoveryComplete": False,
+            "discoveryCursor": None,
+            "sessions": [],
+            "batches": [],
+        },
+    ]
+    index = state["partitions"].index(partition)
+    state["partitions"][index : index + 1] = children
+    state["retryHistory"].append(
+        {"kind": "split_time", "partitionId": partition["partitionId"], "reason": reason}
+    )
+    return True
+
+
+def split_batch(state: dict[str, Any], partition: dict[str, Any], batch: dict[str, Any], reason: str) -> bool:
+    session_ids = batch["sessionIds"]
+    if len(session_ids) > 1:
+        midpoint = len(session_ids) // 2
+        replacements = make_batches(
+            session_ids[:midpoint],
+            len(session_ids),
+            batch["pageSize"],
+        ) + make_batches(
+            session_ids[midpoint:],
+            len(session_ids),
+            batch["pageSize"],
+        )
+        index = partition["batches"].index(batch)
+        partition["batches"][index : index + 1] = replacements
+        state["retryHistory"].append(
+            {"kind": "split_batch", "batchId": batch["batchId"], "reason": reason}
+        )
+        return True
+    if batch["status"] in {"refs", "files", "tools"} and batch["pageSize"] > 1:
+        batch["pageSize"] = max(1, batch["pageSize"] // 2)
+        cursor_key = f"{batch['status']}Cursor" if batch["status"] != "tools" else "toolCursor"
+        artifacts_key = (
+            f"{batch['status']}Artifacts" if batch["status"] != "tools" else "toolArtifacts"
+        )
+        batch[cursor_key] = None
+        batch[artifacts_key] = []
+        generations = batch.setdefault(
+            "retryGenerations",
+            {"refs": 0, "files": 0, "tools": 0},
+        )
+        generations[batch["status"]] += 1
+        state["retryHistory"].append(
+            {
+                "kind": "reduce_evidence_page",
+                "batchId": batch["batchId"],
+                "stage": batch["status"],
+                "pageSize": batch["pageSize"],
+                "retryGeneration": generations[batch["status"]],
+                "reason": reason,
+            }
+        )
+        return True
+    return False
+
+
+def record_failure(
+    state: dict[str, Any],
+    action: dict[str, Any],
+    reason: str,
+    *,
+    count_attempt: bool = True,
+) -> None:
+    if action["actionId"] in state["handledActionIds"]:
+        return
+    if count_attempt:
+        record_attempt(state)
+    work_counters(state)["failedQueries"] += 1
+    partition = find_partition(state, action["partitionId"])
+    recovered = False
+    if action["kind"] == "discovery":
+        recovered = split_partition(state, partition, reason)
+    else:
+        recovered = split_batch(
+            state,
+            partition,
+            find_batch(partition, action["batchId"]),
+            reason,
+        )
+    if recovered:
+        state["handledActionIds"].append(action["actionId"])
+        return
+    blocker = {
+        "actionId": action["actionId"],
+        "kind": action["kind"],
+        "reason": reason,
+    }
+    state["blockers"].append(blocker)
+    state["handledActionIds"].append(action["actionId"])
+    state["status"] = "blocked"
+    validate_state_invariants(state)
+
+
+def load_action(path: str) -> dict[str, Any]:
+    action = read_json(path)
+    if not isinstance(action, dict):
+        raise ValueError("action must be a JSON object")
+    return action
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init = subparsers.add_parser("init")
+    init.add_argument("--out", required=True)
+    init.add_argument("--repository", required=True)
+    init.add_argument("--start", required=True)
+    init.add_argument("--end", required=True)
+    init.add_argument("--run-dir", required=True)
+    init.add_argument("--discovery-page-size", type=int, default=500)
+    init.add_argument("--session-batch-size", type=int, default=100)
+    init.add_argument("--tool-page-size", type=int, default=500)
+    init.add_argument("--max-rows", type=int, default=1000)
+    init.add_argument("--max-artifact-bytes", type=int, default=10_000_000)
+    init.add_argument("--min-window-minutes", type=int, default=15)
+
+    next_parser = subparsers.add_parser("next")
+    next_parser.add_argument("--state", required=True)
+    next_parser.add_argument("--out", required=True)
+
+    success = subparsers.add_parser("record-success")
+    success.add_argument("--state", required=True)
+    success.add_argument("--action", required=True)
+    success.add_argument("--result", required=True)
+    success.add_argument("--out", required=True)
+
+    failure = subparsers.add_parser("record-failure")
+    failure.add_argument("--state", required=True)
+    failure.add_argument("--action", required=True)
+    failure.add_argument("--reason", required=True)
+    failure.add_argument("--out", required=True)
+
+    args = parser.parse_args()
+    try:
+        if args.command == "init":
+            write_json(args.out, initialize(args))
+            return
+        state = read_json(args.state)
+        if not isinstance(state, dict):
+            raise ValueError("state must be a JSON object")
+        if args.command == "next":
+            action = next_action(state)
+            write_json(args.state, state)
+            done = {"kind": "done", "status": state["status"]}
+            if state["status"] == "blocked":
+                done["blocker"] = state["blockers"][-1]
+            write_json(args.out, action or done)
+            return
+        action = load_action(args.action)
+        if args.command == "record-success":
+            try:
+                record_success(state, action, args.result)
+            except OverflowError as error:
+                record_failure(state, action, str(error), count_attempt=False)
+        else:
+            record_failure(state, action, args.reason)
+        write_json(args.out, state)
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise SystemExit(str(error)) from error
+
+
+if __name__ == "__main__":
+    main()

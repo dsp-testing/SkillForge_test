@@ -3,6 +3,67 @@
   "$id": "https://github.com/github/copilot-agent-runtime/repository-skill-forge/schemas.json",
   "title": "Repository Skill Forge artifact schemas",
   "$defs": {
+    "extractionState": {
+      "type": "object",
+      "required": [
+        "schemaVersion",
+        "scope",
+        "runDir",
+        "limits",
+        "partitions",
+        "retryHistory",
+        "blockers",
+        "handledActionIds",
+        "workCounters",
+        "status"
+      ],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "scope": {
+          "type": "object",
+          "required": ["kind", "repository", "windowStart", "windowEnd"],
+          "properties": {
+            "kind": { "const": "repository" },
+            "repository": { "type": "string" },
+            "windowStart": { "type": "string" },
+            "windowEnd": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "runDir": { "type": "string" },
+        "limits": {
+          "type": "object",
+          "required": [
+            "discoveryPageSize",
+            "sessionBatchSize",
+            "toolPageSize",
+            "maxRows",
+            "maxArtifactBytes",
+            "minWindowMinutes"
+          ],
+          "additionalProperties": false
+        },
+        "partitions": { "type": "array", "items": { "type": "object" } },
+        "retryHistory": { "type": "array", "items": { "type": "object" } },
+        "blockers": { "type": "array", "items": { "type": "object" } },
+        "handledActionIds": { "type": "array", "items": { "type": "string" } },
+        "workCounters": {
+          "type": "object",
+          "required": ["queryAttempts", "successfulQueries", "failedQueries", "rows", "toolCalls", "artifactBytes"],
+          "properties": {
+            "queryAttempts": { "type": "integer", "minimum": 0 },
+            "successfulQueries": { "type": "integer", "minimum": 0 },
+            "failedQueries": { "type": "integer", "minimum": 0 },
+            "rows": { "type": "integer", "minimum": 0 },
+            "toolCalls": { "type": "integer", "minimum": 0 },
+            "artifactBytes": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "status": { "enum": ["running", "complete", "blocked"] }
+      },
+      "additionalProperties": false
+    },
     "normalizedSessionDocument": {
       "type": "object",
       "required": ["schemaVersion", "scope", "coverage", "userDiversity", "sessions"],

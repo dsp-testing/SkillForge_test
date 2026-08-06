@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (c) Microsoft Corporation. All rights reserved.
 
-"""Normalize repository-scoped session query rows into stable session bundles."""
+"""Normalize bounded repository-scoped extraction artifacts into session bundles."""
 
 from __future__ import annotations
 
@@ -131,25 +131,147 @@ def normalize_rows(
     }
 
 
+def normalize_batched_rows(
+    metadata_rows: list[dict[str, Any]],
+    ref_rows: list[dict[str, Any]],
+    file_rows: list[dict[str, Any]],
+    tool_rows: list[dict[str, Any]],
+    *,
+    repository: str,
+    window_start: str,
+    window_end: str,
+    limit_sessions: int,
+) -> dict[str, Any]:
+    rows_by_session: dict[str, list[dict[str, Any]]] = {}
+    for tool_row in tool_rows:
+        session_id = as_string(tool_row.get("session_id"))
+        if session_id:
+            rows_by_session.setdefault(session_id, []).append(tool_row)
+
+    refs_by_session: dict[str, list[dict[str, Any]]] = {}
+    for ref_row in ref_rows:
+        session_id = as_string(ref_row.get("session_id"))
+        if session_id:
+            refs_by_session.setdefault(session_id, []).append(
+                {
+                    key: ref_row.get(key)
+                    for key in ("ref_type", "ref_value", "turn_index")
+                }
+            )
+    files_by_session: dict[str, list[dict[str, Any]]] = {}
+    for file_row in file_rows:
+        session_id = as_string(file_row.get("session_id"))
+        if session_id:
+            files_by_session.setdefault(session_id, []).append(
+                {
+                    key: file_row.get(key)
+                    for key in ("file_path", "tool_name", "turn_index")
+                }
+            )
+
+    flattened: list[dict[str, Any]] = []
+    for rank, metadata in enumerate(metadata_rows, start=1):
+        session_id = as_string(metadata.get("session_id"))
+        if not session_id:
+            flattened.append(metadata)
+            continue
+        calls = rows_by_session.pop(session_id, [])
+        common = {
+            **metadata,
+            "session_rank": rank,
+            "refs_json": refs_by_session.pop(
+                session_id,
+                normalize_collection(metadata.get("refs_json"), "refs_json"),
+            ),
+            "files_json": files_by_session.pop(
+                session_id,
+                normalize_collection(metadata.get("files_json"), "files_json"),
+            ),
+        }
+        if calls:
+            flattened.extend({**common, **call} for call in calls)
+        else:
+            flattened.append(common)
+    for session_id in sorted(rows_by_session):
+        for call in rows_by_session[session_id]:
+            flattened.append(call)
+    if refs_by_session or files_by_session:
+        flattened.append({"session_id": None, "agent_name": None})
+
+    document = normalize_rows(
+        flattened,
+        repository=repository,
+        window_start=window_start,
+        window_end=window_end,
+        limit_sessions=limit_sessions,
+    )
+    for session in document["sessions"]:
+        session["toolCalls"].sort(
+            key=lambda call: (
+                call.get("completedAt") is None,
+                call.get("completedAt") or "",
+                call.get("toolCallId") or "",
+            )
+        )
+    document["coverage"]["metadataRowCount"] = len(metadata_rows)
+    document["coverage"]["refRowCount"] = len(ref_rows)
+    document["coverage"]["fileRowCount"] = len(file_rows)
+    document["coverage"]["toolRowCount"] = len(tool_rows)
+    return document
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--in", dest="input", required=True)
+    parser.add_argument("--in", dest="input")
+    parser.add_argument("--metadata-in")
+    parser.add_argument("--refs-in", action="append", default=[])
+    parser.add_argument("--files-in", action="append", default=[])
+    parser.add_argument("--tool-in", action="append", default=[])
     parser.add_argument("--out", dest="output", required=True)
     parser.add_argument("--repository", required=True)
     parser.add_argument("--window-start", required=True)
     parser.add_argument("--window-end", required=True)
     parser.add_argument("--limit-sessions", type=int, default=500)
     args = parser.parse_args()
-    rows = read_json(args.input)
-    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-        raise SystemExit("input must be a JSON array of query rows")
-    document = normalize_rows(
-        rows,
-        repository=args.repository,
-        window_start=args.window_start,
-        window_end=args.window_end,
-        limit_sessions=args.limit_sessions,
-    )
+    if args.input and (args.metadata_in or args.refs_in or args.files_in or args.tool_in):
+        raise SystemExit("use either --in or the batched --metadata-in/--tool-in inputs")
+    if args.input:
+        rows = read_json(args.input)
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise SystemExit("input must be a JSON array of query rows")
+        document = normalize_rows(
+            rows,
+            repository=args.repository,
+            window_start=args.window_start,
+            window_end=args.window_end,
+            limit_sessions=args.limit_sessions,
+        )
+    else:
+        if not args.metadata_in:
+            raise SystemExit("batched input requires --metadata-in")
+        metadata_rows = read_json(args.metadata_in)
+        ref_pages = [read_json(path) for path in args.refs_in]
+        file_pages = [read_json(path) for path in args.files_in]
+        tool_pages = [read_json(path) for path in args.tool_in]
+        if not isinstance(metadata_rows, list) or any(
+            not isinstance(row, dict) for row in metadata_rows
+        ):
+            raise SystemExit("metadata input must be a JSON array of objects")
+        if any(
+            not isinstance(page, list) or any(not isinstance(row, dict) for row in page)
+            for page in [*ref_pages, *file_pages, *tool_pages]
+        ):
+            raise SystemExit("each paged input must be a JSON array of objects")
+        document = normalize_batched_rows(
+            metadata_rows,
+            [row for page in ref_pages for row in page],
+            [row for page in file_pages for row in page],
+            [row for page in tool_pages for row in page],
+            repository=args.repository,
+            window_start=args.window_start,
+            window_end=args.window_end,
+            limit_sessions=args.limit_sessions,
+        )
     write_json(args.output, document)
     if document["coverage"]["truncated"]:
         raise SystemExit("session evidence is truncated; increase the limit or narrow the window")
