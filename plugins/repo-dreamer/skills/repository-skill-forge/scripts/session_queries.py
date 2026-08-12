@@ -52,13 +52,52 @@ ORDER BY updated_at, id
 LIMIT {limit + 1}"""
 
 
-def build_metadata_query(*, session_ids: list[str]) -> str:
+def build_metadata_query(*, session_ids: list[str], limit: int) -> str:
     ids = sql_values(session_ids)
     return f"""SELECT s.id AS session_id, s.agent_name, s.repository, s.branch,
        s.created_at, s.updated_at
 FROM sessions s
 WHERE s.id IN ({ids})
-ORDER BY s.updated_at, s.id"""
+ORDER BY s.updated_at, s.id
+LIMIT {limit + 1}"""
+
+
+def build_shutdown_query(
+    *,
+    session_id: str,
+    start: str,
+    end: str,
+    limit: int = 1,
+) -> str:
+    return f"""SELECT id AS shutdown_event_id, session_id,
+       timestamp AS completed_at, shutdown_type
+FROM events
+WHERE session_id = '{sql_literal(session_id)}'
+  AND type = 'session.shutdown'
+  AND timestamp >= TIMESTAMP '{sql_literal(start)}'
+  AND timestamp < TIMESTAMP '{sql_literal(end)}'
+ORDER BY timestamp DESC, id DESC
+LIMIT {limit + 1}"""
+
+
+def build_event_metadata_query(
+    *,
+    session_id: str,
+    start: str,
+    end: str,
+    limit: int = 1,
+) -> str:
+    return f"""SELECT e.session_id,
+       arg_max(e.agent_name, e.timestamp) AS agent_name,
+       min(e.timestamp) AS created_at,
+       max(e.timestamp) AS updated_at
+FROM events e
+WHERE e.session_id = '{sql_literal(session_id)}'
+  AND e.timestamp >= TIMESTAMP '{sql_literal(start)}'
+  AND e.timestamp < TIMESTAMP '{sql_literal(end)}'
+GROUP BY e.session_id
+ORDER BY e.session_id
+LIMIT {limit + 1}"""
 
 
 def build_refs_query(
@@ -130,18 +169,30 @@ def build_tool_calls_query(
             f"('{sql_literal(after_session_id)}', '{sql_literal(after_tool_call_id)}')"
         )
     tools = ", ".join(f"'{tool}'" for tool in RELEVANT_TOOLS)
-    return f"""WITH target_sessions AS (
-    SELECT id
-    FROM sessions
-    WHERE created_at >= TIMESTAMP '{sql_literal(start)}'
-      AND created_at < TIMESTAMP '{sql_literal(end)}'
-      AND id IN ({ids})
+    return f"""WITH active_tool_calls AS (
+    SELECT session_id, tool_start_call_id AS tool_call_id
+    FROM events
+    WHERE session_id IN ({ids})
+      AND timestamp >= TIMESTAMP '{sql_literal(start)}'
+      AND timestamp < TIMESTAMP '{sql_literal(end)}'
+      AND type = 'tool.execution_start'
+      AND tool_start_call_id IS NOT NULL
+    UNION
+    SELECT session_id, tool_complete_call_id AS tool_call_id
+    FROM events
+    WHERE session_id IN ({ids})
+      AND timestamp >= TIMESTAMP '{sql_literal(start)}'
+      AND timestamp < TIMESTAMP '{sql_literal(end)}'
+      AND type = 'tool.execution_complete'
+      AND tool_complete_call_id IS NOT NULL
 ),
 selected_tool_calls AS (
     SELECT tr.session_id, tr.tool_call_id, lower(tr.name) AS tool_name,
            tr.arguments_json
     FROM tool_requests tr
-    JOIN target_sessions ts ON ts.id = tr.session_id
+    JOIN active_tool_calls active
+      ON active.session_id = tr.session_id
+     AND active.tool_call_id = tr.tool_call_id
     WHERE lower(tr.name) IN ({tools}){cursor}
     ORDER BY tr.session_id, tr.tool_call_id
     LIMIT {limit + 1}
@@ -163,6 +214,7 @@ completion_events AS (
          AND tr.tool_call_id = e.tool_complete_call_id
         WHERE e.timestamp >= TIMESTAMP '{sql_literal(start)}'
           AND e.timestamp < TIMESTAMP '{sql_literal(end)}'
+          AND e.type = 'tool.execution_complete'
     )
     WHERE completion_rank = 1
 )
@@ -173,3 +225,58 @@ LEFT JOIN completion_events ce
   ON ce.session_id = tr.session_id
  AND ce.tool_complete_call_id = tr.tool_call_id
 ORDER BY tr.session_id, tr.tool_call_id"""
+
+
+def build_event_tool_calls_query(
+    *,
+    session_id: str,
+    start: str,
+    end: str,
+    limit: int,
+    after_tool_call_id: str | None = None,
+) -> str:
+    cursor = ""
+    if after_tool_call_id:
+        cursor = f"\n      AND e.tool_start_call_id > '{sql_literal(after_tool_call_id)}'"
+    tools = ", ".join(f"'{tool}'" for tool in RELEVANT_TOOLS)
+    return f"""WITH selected_tool_calls AS (
+    SELECT e.session_id, e.tool_start_call_id AS tool_call_id,
+           lower(e.tool_start_name) AS tool_name,
+           e.tool_start_arguments_json AS arguments_json
+    FROM events e
+    WHERE e.session_id = '{sql_literal(session_id)}'
+      AND e.timestamp >= TIMESTAMP '{sql_literal(start)}'
+      AND e.timestamp < TIMESTAMP '{sql_literal(end)}'
+      AND e.type = 'tool.execution_start'
+      AND lower(e.tool_start_name) IN ({tools}){cursor}
+    ORDER BY e.tool_start_call_id
+    LIMIT {limit + 1}
+),
+completion_events AS (
+    SELECT session_id, tool_complete_call_id, tool_complete_success,
+           tool_complete_result_content AS result_content,
+           timestamp AS completed_at
+    FROM (
+        SELECT e.session_id, e.tool_complete_call_id, e.tool_complete_success,
+               e.tool_complete_result_content, e.timestamp,
+               row_number() OVER (
+                   PARTITION BY e.session_id, e.tool_complete_call_id
+                   ORDER BY e.timestamp DESC
+               ) AS completion_rank
+        FROM events e
+        JOIN selected_tool_calls tr
+          ON tr.session_id = e.session_id
+         AND tr.tool_call_id = e.tool_complete_call_id
+        WHERE e.timestamp >= TIMESTAMP '{sql_literal(start)}'
+          AND e.timestamp < TIMESTAMP '{sql_literal(end)}'
+          AND e.type = 'tool.execution_complete'
+    )
+    WHERE completion_rank = 1
+)
+SELECT tr.session_id, tr.tool_call_id, tr.tool_name, tr.arguments_json,
+       ce.tool_complete_success, ce.result_content, ce.completed_at
+FROM selected_tool_calls tr
+LEFT JOIN completion_events ce
+  ON ce.session_id = tr.session_id
+ AND ce.tool_complete_call_id = tr.tool_call_id
+ORDER BY tr.tool_call_id"""

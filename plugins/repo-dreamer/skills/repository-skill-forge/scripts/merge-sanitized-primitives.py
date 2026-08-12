@@ -109,6 +109,7 @@ def main() -> None:
         required=True,
     )
     parser.add_argument("--ledger-in")
+    parser.add_argument("--extraction-state")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
     ledger = None
@@ -126,6 +127,22 @@ def main() -> None:
         result = merge(documents, ledger)
     except ValueError as error:
         raise SystemExit(str(error)) from error
+    if args.extraction_state:
+        extraction_state = read_json(args.extraction_state)
+        if not isinstance(extraction_state, dict):
+            raise SystemExit("extraction state must be a JSON object")
+        if extraction_state.get("status") not in {"complete", "partial"}:
+            raise SystemExit("extraction state is not publishable")
+        extraction_coverage = extraction_state.get("coverage")
+        if not isinstance(extraction_coverage, dict):
+            raise SystemExit("extraction state is missing coverage")
+        result["coverage"].update(
+            {
+                "partial": extraction_state.get("status") == "partial",
+                **extraction_coverage,
+                "omittedUnits": extraction_state.get("omittedUnits", []),
+            }
+        )
     write_json(args.out, result)
 
 
