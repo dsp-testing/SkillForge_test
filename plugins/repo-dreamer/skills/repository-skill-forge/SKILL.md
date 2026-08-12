@@ -103,7 +103,8 @@ Initialize `extraction-controller.py` with the interface defaults. Its primary
 strategy remains the deployed `83efbd19bc` approach:
 
 1. discover sessions by `sessions.updated_at`, keyset ordered by
-   `(updated_at, id)`, with pages of 500;
+   `(updated_at, id)`, with pages of 500 and an exact SQL repository predicate
+   in addition to the mandatory tool-level repository scope;
 2. fetch exact-ID `sessions` metadata in batches of 100;
 3. fetch bounded `session_refs` and `session_files`;
 4. fetch relevant `tool_requests` with pages of 500 and time-bounded completion
@@ -116,6 +117,10 @@ Do not fetch turns, assistant messages, unrelated tools, or a global shutdown
 inventory. Every paged query requests `limit + 1`. Retry the identical failed
 action according to `maxQueryRetries`, then split only the failing time window,
 session batch, or page.
+
+Every query success or failure must be recorded through
+`extraction-controller.py`. Never retry a query manually, alter controller SQL
+ad hoc, or continue after the controller returns a blocked state.
 
 ### 4. Handle irreducible query failures
 
