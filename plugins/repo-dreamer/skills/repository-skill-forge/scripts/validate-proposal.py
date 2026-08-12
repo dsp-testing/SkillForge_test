@@ -75,8 +75,9 @@ def validate(document: dict[str, Any]) -> list[str]:
         not isinstance(candidate_ids, list)
         or not candidate_ids
         or any(not isinstance(candidate_id, str) or not candidate_id for candidate_id in candidate_ids)
+        or len(set(candidate_ids)) != len(candidate_ids)
     ):
-        errors.append("candidateIds must be a non-empty string array")
+        errors.append("candidateIds must be a non-empty array of unique strings")
     if not document.get("proposalVersion"):
         errors.append("proposalVersion is required")
     validate_extraction(document, errors)

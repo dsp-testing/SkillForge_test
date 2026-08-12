@@ -94,7 +94,7 @@ def build_event_metadata_query(
 FROM events e
 WHERE e.session_id = '{sql_literal(session_id)}'
   AND e.timestamp >= TIMESTAMP '{sql_literal(start)}'
-  AND e.timestamp <= TIMESTAMP '{sql_literal(end)}'
+  AND e.timestamp < TIMESTAMP '{sql_literal(end)}'
 GROUP BY e.session_id
 ORDER BY e.session_id
 LIMIT {limit + 1}"""
