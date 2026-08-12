@@ -15,10 +15,15 @@ from forge_common import parse_timestamp, read_json, write_json
 
 MARKER = "repository-skill-forge-state"
 BLOCK_RE = re.compile(
+    rf"```{MARKER}:v(?P<version>\d+)\s*\n(?P<payload>.*?)\n```",
+    re.DOTALL,
+)
+BLOCK_OPEN_RE = re.compile(rf"```{MARKER}:v")
+LEGACY_BLOCK_RE = re.compile(
     rf"<!--\s*{MARKER}:v(?P<version>\d+)\s*\n(?P<payload>.*?)\n-->",
     re.DOTALL,
 )
-BLOCK_OPEN_RE = re.compile(rf"<!--\s*{MARKER}:v")
+LEGACY_BLOCK_OPEN_RE = re.compile(rf"<!--\s*{MARKER}:v")
 DEFAULT_MAX_BYTES = 60_000
 ALLOWED_TOP_LEVEL = {
     "schemaVersion",
@@ -345,8 +350,11 @@ def validate_state(state: Any, repository: str) -> dict[str, Any]:
 def parse_body(body: str, repository: str, max_bytes: int) -> dict[str, Any]:
     if len(body.encode("utf-8")) > max_bytes:
         raise ValueError("issue body exceeds the configured serialized-size ceiling")
-    matches = list(BLOCK_RE.finditer(body))
-    if len(matches) != 1 or len(BLOCK_OPEN_RE.findall(body)) != 1:
+    matches = list(BLOCK_RE.finditer(body)) + list(LEGACY_BLOCK_RE.finditer(body))
+    marker_count = len(BLOCK_OPEN_RE.findall(body)) + len(
+        LEGACY_BLOCK_OPEN_RE.findall(body)
+    )
+    if len(matches) != 1 or marker_count != 1:
         raise ValueError("issue body must contain exactly one well-formed state block")
     match = matches[0]
     if int(match.group("version")) != 1:
@@ -369,7 +377,7 @@ def render_body(
         sort_keys=True,
         separators=(",", ":"),
     )
-    block = f"<!-- {MARKER}:v1\n{payload}\n-->"
+    block = f"```{MARKER}:v1\n{payload}\n```"
     if existing_body is None:
         human = (
             "# Repository Skill Forge state\n\n"
@@ -378,15 +386,20 @@ def render_body(
         )
         rendered = f"{human}\n\n{block}\n"
     else:
-        matches = list(BLOCK_RE.finditer(existing_body))
-        marker_count = len(BLOCK_OPEN_RE.findall(existing_body))
+        matches = list(BLOCK_RE.finditer(existing_body)) + list(
+            LEGACY_BLOCK_RE.finditer(existing_body)
+        )
+        marker_count = len(BLOCK_OPEN_RE.findall(existing_body)) + len(
+            LEGACY_BLOCK_OPEN_RE.findall(existing_body)
+        )
         if matches:
             if len(matches) != 1 or marker_count != 1:
                 raise ValueError("existing issue body has duplicate or malformed state blocks")
+            match = matches[0]
             rendered = (
-                existing_body[: matches[0].start()]
+                existing_body[: match.start()]
                 + block
-                + existing_body[matches[0].end() :]
+                + existing_body[match.end() :]
             )
         elif marker_count:
             raise ValueError("existing issue body has a malformed state marker")
