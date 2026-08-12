@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import re
 from pathlib import Path
@@ -15,11 +16,17 @@ from forge_common import parse_timestamp, read_json, write_json
 
 MARKER = "repository-skill-forge-state"
 BLOCK_RE = re.compile(
+    rf"^{MARKER}:v(?P<version>\d+):begin[ \t]*\r?\n"
+    rf"(?P<payload>.*?)\r?\n{MARKER}:v(?P=version):end[ \t]*\r?$",
+    re.DOTALL | re.MULTILINE,
+)
+BLOCK_OPEN_RE = re.compile(rf"^{MARKER}:v\d+:begin", re.MULTILINE)
+FENCED_BLOCK_RE = re.compile(
     rf"^```{MARKER}:v(?P<version>\d+)[ \t]*\r?\n"
     rf"(?P<payload>.*?)\r?\n```[ \t]*\r?$",
     re.DOTALL | re.MULTILINE,
 )
-BLOCK_OPEN_RE = re.compile(rf"^```{MARKER}:v", re.MULTILINE)
+FENCED_BLOCK_OPEN_RE = re.compile(rf"^```{MARKER}:v", re.MULTILINE)
 LEGACY_BLOCK_RE = re.compile(
     rf"^<!--[ \t]*{MARKER}:v(?P<version>\d+)[ \t]*\r?\n"
     rf"(?P<payload>.*?)\r?\n-->[ \t]*\r?$",
@@ -29,6 +36,7 @@ LEGACY_BLOCK_OPEN_RE = re.compile(
     rf"^<!--[ \t]*{MARKER}:v",
     re.MULTILINE,
 )
+MAX_HTML_UNESCAPE_PASSES = 3
 DEFAULT_MAX_BYTES = 60_000
 ALLOWED_TOP_LEVEL = {
     "schemaVersion",
@@ -355,20 +363,35 @@ def validate_state(state: Any, repository: str) -> dict[str, Any]:
 def parse_body(body: str, repository: str, max_bytes: int) -> dict[str, Any]:
     if len(body.encode("utf-8")) > max_bytes:
         raise ValueError("issue body exceeds the configured serialized-size ceiling")
-    matches = list(BLOCK_RE.finditer(body)) + list(LEGACY_BLOCK_RE.finditer(body))
-    marker_count = len(BLOCK_OPEN_RE.findall(body)) + len(
-        LEGACY_BLOCK_OPEN_RE.findall(body)
+    matches = (
+        [(match, 2) for match in BLOCK_RE.finditer(body)]
+        + [(match, 1) for match in FENCED_BLOCK_RE.finditer(body)]
+        + [(match, 1) for match in LEGACY_BLOCK_RE.finditer(body)]
+    )
+    marker_count = (
+        len(BLOCK_OPEN_RE.findall(body))
+        + len(FENCED_BLOCK_OPEN_RE.findall(body))
+        + len(LEGACY_BLOCK_OPEN_RE.findall(body))
     )
     if len(matches) != 1 or marker_count != 1:
         raise ValueError("issue body must contain exactly one well-formed state block")
-    match = matches[0]
-    if int(match.group("version")) != 1:
+    match, supported_version = matches[0]
+    if int(match.group("version")) != supported_version:
         raise ValueError("unsupported issue state marker version")
-    try:
-        state = json.loads(match.group("payload"))
-    except json.JSONDecodeError as error:
-        raise ValueError("issue state block contains malformed JSON") from error
-    return validate_state(state, repository)
+    payload = match.group("payload")
+    error: json.JSONDecodeError | None = None
+    for attempt in range(MAX_HTML_UNESCAPE_PASSES + 1):
+        try:
+            return validate_state(json.loads(payload), repository)
+        except json.JSONDecodeError as current_error:
+            error = current_error
+        if attempt == MAX_HTML_UNESCAPE_PASSES:
+            break
+        decoded_payload = html.unescape(payload)
+        if decoded_payload == payload:
+            break
+        payload = decoded_payload
+    raise ValueError("issue state block contains malformed JSON") from error
 
 
 def render_body(
@@ -382,7 +405,7 @@ def render_body(
         sort_keys=True,
         separators=(",", ":"),
     )
-    block = f"```{MARKER}:v1\n{payload}\n```"
+    block = f"{MARKER}:v2:begin\n{payload}\n{MARKER}:v2:end"
     if existing_body is None:
         human = (
             "# Repository Skill Forge state\n\n"
@@ -391,16 +414,22 @@ def render_body(
         )
         rendered = f"{human}\n\n{block}\n"
     else:
-        matches = list(BLOCK_RE.finditer(existing_body)) + list(
-            LEGACY_BLOCK_RE.finditer(existing_body)
+        matches = (
+            [(match, 2) for match in BLOCK_RE.finditer(existing_body)]
+            + [(match, 1) for match in FENCED_BLOCK_RE.finditer(existing_body)]
+            + [(match, 1) for match in LEGACY_BLOCK_RE.finditer(existing_body)]
         )
-        marker_count = len(BLOCK_OPEN_RE.findall(existing_body)) + len(
-            LEGACY_BLOCK_OPEN_RE.findall(existing_body)
+        marker_count = (
+            len(BLOCK_OPEN_RE.findall(existing_body))
+            + len(FENCED_BLOCK_OPEN_RE.findall(existing_body))
+            + len(LEGACY_BLOCK_OPEN_RE.findall(existing_body))
         )
         if matches:
             if len(matches) != 1 or marker_count != 1:
                 raise ValueError("existing issue body has duplicate or malformed state blocks")
-            match = matches[0]
+            match, supported_version = matches[0]
+            if int(match.group("version")) != supported_version:
+                raise ValueError("unsupported issue state marker version")
             rendered = (
                 existing_body[: match.start()]
                 + block

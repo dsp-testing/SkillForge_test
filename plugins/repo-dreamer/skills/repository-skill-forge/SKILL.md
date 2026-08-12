@@ -59,15 +59,11 @@ pre-provisioned. Never continue with an unlabeled issue or PR.
 Create the issue only when none exists. Fail if multiple matching issues exist.
 Preserve all human-maintained issue text.
 
-Managed state uses a visible fenced code block whose info string is
-`repository-skill-forge-state:v1`, which approved GitHub MCP reads preserve.
-The parser accepts the legacy HTML-comment block only for migration; every
-render writes the visible format.
+Managed state uses visible plain-text markers that approved GitHub MCP reads
+preserve:
 
-For a new issue, initialize the managed block with:
-
-````markdown
-```repository-skill-forge-state:v1
+```text
+repository-skill-forge-state:v2:begin
 {
     "schemaVersion": 2,
     "stateVersion": 1,
@@ -78,8 +74,13 @@ For a new issue, initialize the managed block with:
     "proposalQueue": [],
     "proposalHistory": {}
 }
+repository-skill-forge-state:v2:end
 ```
-````
+
+MCP may repeatedly HTML-encode the JSON payload. The parser first accepts raw
+JSON, then applies at most three HTML-decoding passes while JSON remains
+invalid. It also accepts the fenced and HTML-comment v1 formats for migration;
+every render writes the plain v2 format.
 
 Parse an existing body with:
 
