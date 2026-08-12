@@ -59,9 +59,15 @@ pre-provisioned. Never continue with an unlabeled issue or PR.
 Create the issue only when none exists. Fail if multiple matching issues exist.
 Preserve all human-maintained issue text.
 
-For a new issue, initialize:
+Managed state uses a visible fenced code block whose info string is
+`repository-skill-forge-state:v1`, which approved GitHub MCP reads preserve.
+The parser accepts the legacy HTML-comment block only for migration; every
+render writes the visible format.
 
-```json
+For a new issue, initialize the managed block with:
+
+````markdown
+```repository-skill-forge-state:v1
 {
     "schemaVersion": 2,
     "stateVersion": 1,
@@ -73,6 +79,7 @@ For a new issue, initialize:
     "proposalHistory": {}
 }
 ```
+````
 
 Parse an existing body with:
 
@@ -86,7 +93,9 @@ python3 "$SKILL_DIR/scripts/issue-state.py" parse \
 
 Reject repository/version mismatches, malformed or duplicate managed blocks,
 unsupported nested shapes, raw session fields, commands, local paths, secrets,
-and oversized state.
+and oversized state. Immediately read back and parse a newly created or updated
+issue before continuing. If state readback or parsing fails, stop without
+modifying the issue body again; do not replace it with a blocked-run note.
 
 ### 2. Select the incremental window
 
