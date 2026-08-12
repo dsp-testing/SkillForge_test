@@ -162,10 +162,18 @@ def extraction_coverage(state: dict[str, Any]) -> dict[str, Any]:
         if batch["status"] == "complete"
         for session_id in batch["sessionIds"]
     }
+    omitted_unit_kinds = sorted(
+        {
+            str(unit["kind"])
+            for unit in state["omittedUnits"]
+            if isinstance(unit, dict) and unit.get("kind")
+        }
+    )
     return {
         "discoveredSessionCount": len(discovered_ids),
         "completedSessionCount": len(completed_ids),
         "omittedUnitCount": len(state["omittedUnits"]),
+        "omittedUnitKinds": omitted_unit_kinds,
         "sessionCoverage": (
             len(completed_ids) / len(discovered_ids) if discovered_ids else 1.0
         ),
@@ -529,8 +537,8 @@ def record_success(
             }
         else:
             batch["toolCursor"] = {
-                "sessionId": last["session_id"],
-                "toolCallId": last["tool_call_id"],
+                "sessionId": str(last["session_id"]),
+                "toolCallId": str(last["tool_call_id"]),
             }
         state["handledActionIds"].append(action["actionId"])
         return

@@ -18,6 +18,7 @@ BLOCK_RE = re.compile(
     rf"<!--\s*{MARKER}:v(?P<version>\d+)\s*\n(?P<payload>.*?)\n-->",
     re.DOTALL,
 )
+BLOCK_OPEN_RE = re.compile(rf"<!--\s*{MARKER}:v")
 DEFAULT_MAX_BYTES = 60_000
 ALLOWED_TOP_LEVEL = {
     "schemaVersion",
@@ -345,7 +346,7 @@ def parse_body(body: str, repository: str, max_bytes: int) -> dict[str, Any]:
     if len(body.encode("utf-8")) > max_bytes:
         raise ValueError("issue body exceeds the configured serialized-size ceiling")
     matches = list(BLOCK_RE.finditer(body))
-    if len(matches) != 1 or body.count(MARKER) != 1:
+    if len(matches) != 1 or len(BLOCK_OPEN_RE.findall(body)) != 1:
         raise ValueError("issue body must contain exactly one well-formed state block")
     match = matches[0]
     if int(match.group("version")) != 1:
@@ -378,7 +379,7 @@ def render_body(
         rendered = f"{human}\n\n{block}\n"
     else:
         matches = list(BLOCK_RE.finditer(existing_body))
-        marker_count = existing_body.count(MARKER)
+        marker_count = len(BLOCK_OPEN_RE.findall(existing_body))
         if matches:
             if len(matches) != 1 or marker_count != 1:
                 raise ValueError("existing issue body has duplicate or malformed state blocks")
