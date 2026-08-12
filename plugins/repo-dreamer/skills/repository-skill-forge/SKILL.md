@@ -77,9 +77,10 @@ repository-skill-forge-state:v2:begin
 repository-skill-forge-state:v2:end
 ```
 
-MCP may HTML-encode the JSON payload. The parser first accepts raw JSON, then
-HTML-decodes only when raw JSON parsing fails. It also accepts the fenced and
-HTML-comment v1 formats for migration; every render writes the plain v2 format.
+MCP may repeatedly HTML-encode the JSON payload. The parser first accepts raw
+JSON, then applies at most three HTML-decoding passes while JSON remains
+invalid. It also accepts the fenced and HTML-comment v1 formats for migration;
+every render writes the plain v2 format.
 
 Parse an existing body with:
 

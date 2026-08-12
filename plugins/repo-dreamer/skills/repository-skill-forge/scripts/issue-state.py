@@ -36,6 +36,7 @@ LEGACY_BLOCK_OPEN_RE = re.compile(
     rf"^<!--[ \t]*{MARKER}:v",
     re.MULTILINE,
 )
+MAX_HTML_UNESCAPE_PASSES = 3
 DEFAULT_MAX_BYTES = 60_000
 ALLOWED_TOP_LEVEL = {
     "schemaVersion",
@@ -378,17 +379,19 @@ def parse_body(body: str, repository: str, max_bytes: int) -> dict[str, Any]:
     if int(match.group("version")) != supported_version:
         raise ValueError("unsupported issue state marker version")
     payload = match.group("payload")
-    try:
-        state = json.loads(payload)
-    except json.JSONDecodeError as raw_error:
+    error: json.JSONDecodeError | None = None
+    for attempt in range(MAX_HTML_UNESCAPE_PASSES + 1):
+        try:
+            return validate_state(json.loads(payload), repository)
+        except json.JSONDecodeError as current_error:
+            error = current_error
+        if attempt == MAX_HTML_UNESCAPE_PASSES:
+            break
         decoded_payload = html.unescape(payload)
         if decoded_payload == payload:
-            raise ValueError("issue state block contains malformed JSON") from raw_error
-        try:
-            state = json.loads(decoded_payload)
-        except json.JSONDecodeError as decoded_error:
-            raise ValueError("issue state block contains malformed JSON") from decoded_error
-    return validate_state(state, repository)
+            break
+        payload = decoded_payload
+    raise ValueError("issue state block contains malformed JSON") from error
 
 
 def render_body(
@@ -412,9 +415,9 @@ def render_body(
         rendered = f"{human}\n\n{block}\n"
     else:
         matches = (
-            list(BLOCK_RE.finditer(existing_body))
-            + list(FENCED_BLOCK_RE.finditer(existing_body))
-            + list(LEGACY_BLOCK_RE.finditer(existing_body))
+            [(match, 2) for match in BLOCK_RE.finditer(existing_body)]
+            + [(match, 1) for match in FENCED_BLOCK_RE.finditer(existing_body)]
+            + [(match, 1) for match in LEGACY_BLOCK_RE.finditer(existing_body)]
         )
         marker_count = (
             len(BLOCK_OPEN_RE.findall(existing_body))
@@ -424,7 +427,9 @@ def render_body(
         if matches:
             if len(matches) != 1 or marker_count != 1:
                 raise ValueError("existing issue body has duplicate or malformed state blocks")
-            match = matches[0]
+            match, supported_version = matches[0]
+            if int(match.group("version")) != supported_version:
+                raise ValueError("unsupported issue state marker version")
             rendered = (
                 existing_body[: match.start()]
                 + block
