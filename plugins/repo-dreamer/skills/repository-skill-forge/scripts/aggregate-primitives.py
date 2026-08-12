@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from collections import defaultdict
 from datetime import timedelta
 from typing import Any
@@ -34,14 +35,77 @@ def merge_evidence(
         raise ValueError("state repository does not match the current repository")
     evidence_by_key: dict[str, dict[str, Any]] = {}
     if isinstance(state, dict):
-        for item in state.get("evidenceLedger", []):
+        for item in state.get("observations", state.get("evidenceLedger", [])):
             if isinstance(item, dict) and item.get("evidenceKey"):
                 evidence_by_key[str(item["evidenceKey"])] = item
     for item in document.get("primitives", []):
         if isinstance(item, dict) and item.get("evidenceKey"):
-            evidence_by_key[str(item["evidenceKey"])] = item
+            evidence_by_key[str(item["evidenceKey"])] = compact_observation(
+                item,
+                repository,
+            ) | {
+                "signature": item.get("signature") if isinstance(item.get("signature"), dict) else {},
+                "commandTemplate": item.get("commandTemplate"),
+            }
     history = state.get("proposalHistory", {}) if isinstance(state, dict) else {}
     return list(evidence_by_key.values()), history if isinstance(history, dict) else {}
+
+
+def compact_observation(item: dict[str, Any], repository: str) -> dict[str, Any]:
+    session_hash = (
+        str(item["sessionHash"])
+        if item.get("sessionHash")
+        else stable_hash(
+            {"repository": repository, "session": item.get("sessionId")},
+            24,
+        )
+    )
+    refs = item.get("refs") if isinstance(item.get("refs"), list) else []
+    path_families = [
+        str(path)
+        for path in (item.get("pathFamilies") if isinstance(item.get("pathFamilies"), list) else [])
+        if is_repository_path_family(str(path))
+    ]
+    branch_hash = item.get("branchHash")
+    branch_id = item.get("branchId")
+    return {
+        "evidenceKey": str(item.get("evidenceKey") or ""),
+        "fingerprint": str(item.get("fingerprint") or ""),
+        "sessionHash": session_hash,
+        "completedAt": item.get("completedAt"),
+        "day": item.get("day"),
+        "outcome": item.get("outcome"),
+        "surface": item.get("surface"),
+        "kind": item.get("kind"),
+        "branchHash": (
+            str(branch_hash)
+            if branch_hash
+            else (
+                stable_hash({"repository": repository, "branch": branch_id}, 24)
+                if branch_id
+                else None
+            )
+        ),
+        "branchCategory": item.get("branchCategory", "unknown"),
+        "pathFamilies": sorted(path_families)[:8],
+        "refs": [
+            {"type": str(ref.get("type")), "value": str(ref.get("value"))}
+            for ref in refs
+            if isinstance(ref, dict)
+            and ref.get("type") in {"pr", "issue", "commit"}
+            and ref.get("value")
+        ][:8],
+    }
+
+
+def is_repository_path_family(value: str) -> bool:
+    normalized = value.replace("\\", "/")
+    return (
+        bool(normalized)
+        and not normalized.startswith(("/", "~"))
+        and not re.match(r"^[A-Za-z]:/", normalized)
+        and ".." not in normalized.split("/")
+    )
 
 
 def aggregate(
@@ -75,9 +139,9 @@ def aggregate(
         ]
         if not active:
             continue
-        sessions = {str(item.get("sessionId")) for item in active if item.get("sessionId")}
+        sessions = {str(item.get("sessionHash")) for item in active if item.get("sessionHash")}
         days = {str(item.get("day")) for item in active if item.get("day")}
-        branches = {str(item.get("branchId")) for item in active if item.get("branchId")}
+        branches = {str(item.get("branchHash")) for item in active if item.get("branchHash")}
         branch_categories = {
             str(item.get("branchCategory")) for item in active if item.get("branchCategory")
         }
@@ -152,7 +216,14 @@ def aggregate(
                 "fingerprint": fingerprint,
                 "subjectKey": subject_key,
                 "kind": active[0].get("kind"),
-                "signature": active[0].get("signature"),
+                "signature": next(
+                    (
+                        item["signature"]
+                        for item in active
+                        if isinstance(item.get("signature"), dict) and item["signature"]
+                    ),
+                    {},
+                ),
                 "commandTemplates": sorted(
                     {str(item.get("commandTemplate")) for item in active if item.get("commandTemplate")}
                 )[:5],
@@ -260,12 +331,23 @@ def main() -> None:
         if isinstance(item.get("completedAt"), str)
         and parse_timestamp(str(item["completedAt"])) >= stale_start
     ]
+    retained_observations = [
+        compact_observation(item, args.repository)
+        for item in retained_evidence
+    ]
+    prior_version = state.get("stateVersion", 0) if isinstance(state, dict) else 0
+    proposal_queue = state.get("proposalQueue", []) if isinstance(state, dict) else []
     next_state = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "stateVersion": prior_version + 1,
         "scope": {"kind": "repository", "repository": args.repository},
         "cursor": args.next_cursor,
         "updatedAt": timestamp_text(parse_timestamp(args.as_of)),
-        "evidenceLedger": sorted(retained_evidence, key=lambda item: str(item.get("evidenceKey"))),
+        "observations": sorted(
+            retained_observations,
+            key=lambda item: str(item.get("evidenceKey")),
+        ),
+        "proposalQueue": proposal_queue if isinstance(proposal_queue, list) else [],
         "proposalHistory": proposal_history,
     }
     write_json(args.output, result)

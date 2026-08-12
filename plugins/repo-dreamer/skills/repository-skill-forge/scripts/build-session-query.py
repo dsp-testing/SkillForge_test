@@ -10,9 +10,12 @@ import json
 
 from session_queries import (
     build_discovery_query,
+    build_event_metadata_query,
+    build_event_tool_calls_query,
     build_files_query,
     build_metadata_query,
     build_refs_query,
+    build_shutdown_query,
     build_tool_calls_query,
 )
 
@@ -21,7 +24,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--kind",
-        choices=("discovery", "metadata", "refs", "files", "tool-calls"),
+        choices=(
+            "discovery",
+            "metadata",
+            "metadata-events",
+            "shutdown",
+            "refs",
+            "files",
+            "tool-calls",
+            "tool-calls-events",
+        ),
         default="discovery",
     )
     parser.add_argument("--start", help="Inclusive UTC timestamp")
@@ -60,7 +72,23 @@ def main() -> None:
                 after_session_id=args.after_session_id,
             )
         elif args.kind == "metadata":
-            query = build_metadata_query(session_ids=session_ids)
+            query = build_metadata_query(session_ids=session_ids, limit=args.limit)
+        elif args.kind == "shutdown":
+            if len(session_ids) != 1 or not args.start or not args.end:
+                raise ValueError("shutdown requires one --session-id, --start, and --end")
+            query = build_shutdown_query(
+                session_id=session_ids[0],
+                start=args.start,
+                end=args.end,
+            )
+        elif args.kind == "metadata-events":
+            if len(session_ids) != 1 or not args.start or not args.end:
+                raise ValueError("metadata-events requires one --session-id, --start, and --end")
+            query = build_event_metadata_query(
+                session_id=session_ids[0],
+                start=args.start,
+                end=args.end,
+            )
         elif args.kind == "refs":
             if not args.start or not args.end:
                 raise ValueError("refs requires --start and --end")
@@ -97,7 +125,7 @@ def main() -> None:
                 limit=args.limit,
                 cursor=cursor,
             )
-        else:
+        elif args.kind == "tool-calls":
             if not args.start or not args.end:
                 raise ValueError("tool-calls requires --start and --end")
             query = build_tool_calls_query(
@@ -106,6 +134,16 @@ def main() -> None:
                 end=args.end,
                 limit=args.limit,
                 after_session_id=args.after_session_id,
+                after_tool_call_id=args.after_tool_call_id,
+            )
+        else:
+            if len(session_ids) != 1 or not args.start or not args.end:
+                raise ValueError("tool-calls-events requires one --session-id, --start, and --end")
+            query = build_event_tool_calls_query(
+                session_id=session_ids[0],
+                start=args.start,
+                end=args.end,
+                limit=args.limit,
                 after_tool_call_id=args.after_tool_call_id,
             )
     except ValueError as error:

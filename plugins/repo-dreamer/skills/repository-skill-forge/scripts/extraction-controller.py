@@ -14,9 +14,12 @@ from typing import Any
 from forge_common import parse_timestamp, read_json, stable_hash, timestamp_text, write_json
 from session_queries import (
     build_discovery_query,
+    build_event_metadata_query,
+    build_event_tool_calls_query,
     build_files_query,
     build_metadata_query,
     build_refs_query,
+    build_shutdown_query,
     build_tool_calls_query,
 )
 
@@ -29,9 +32,30 @@ def batch_id(session_ids: list[str]) -> str:
     return stable_hash(session_ids, 12)
 
 
+def session_hash(state: dict[str, Any], session_id: str) -> str:
+    return stable_hash(
+        {
+            "repository": state["scope"]["repository"],
+            "sessionId": session_id,
+        },
+        20,
+    )
+
+
 def initialize(args: argparse.Namespace) -> dict[str, Any]:
     if parse_timestamp(args.start) >= parse_timestamp(args.end):
         raise ValueError("--start must be before --end")
+    if min(
+        args.discovery_page_size,
+        args.session_batch_size,
+        args.tool_page_size,
+        args.max_rows,
+        args.max_artifact_bytes,
+        args.min_window_minutes,
+    ) < 1:
+        raise ValueError("page, batch, row, artifact, and window limits must be positive")
+    if args.max_query_retries < 0:
+        raise ValueError("--max-query-retries must be non-negative")
     if args.tool_page_size > args.max_rows or args.discovery_page_size > args.max_rows:
         raise ValueError("page sizes must not exceed --max-rows")
     return {
@@ -50,6 +74,9 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
             "maxRows": args.max_rows,
             "maxArtifactBytes": args.max_artifact_bytes,
             "minWindowMinutes": args.min_window_minutes,
+            "maxQueryRetries": args.max_query_retries,
+            "allowPartial": args.allow_partial,
+            "enableTargetedFallback": args.enable_targeted_fallback,
         },
         "partitions": [
             {
@@ -64,7 +91,9 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
             }
         ],
         "retryHistory": [],
+        "strategyHistory": [],
         "blockers": [],
+        "omittedUnits": [],
         "handledActionIds": [],
         "workCounters": {
             "queryAttempts": 0,
@@ -74,6 +103,7 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
             "toolCalls": 0,
             "artifactBytes": 0,
         },
+        "coverage": None,
         "status": "running",
     }
 
@@ -100,6 +130,8 @@ def validate_state_invariants(state: dict[str, Any]) -> None:
         raise ValueError("blocked extraction state requires a terminal blocker")
     if blockers and status != "blocked":
         raise ValueError("terminal blockers require blocked extraction status")
+    if status == "partial" and not state.get("omittedUnits"):
+        raise ValueError("partial extraction state requires omitted units")
 
 
 def work_counters(state: dict[str, Any]) -> dict[str, int]:
@@ -116,6 +148,40 @@ def work_counters(state: dict[str, Any]) -> dict[str, int]:
     )
 
 
+def extraction_coverage(state: dict[str, Any]) -> dict[str, Any]:
+    discovered_ids = {
+        str(session["session_id"])
+        for partition in state["partitions"]
+        for session in partition["sessions"]
+        if isinstance(session, dict) and session.get("session_id")
+    }
+    completed_ids = {
+        str(session_id)
+        for partition in state["partitions"]
+        for batch in partition["batches"]
+        if batch["status"] == "complete"
+        for session_id in batch["sessionIds"]
+    }
+    return {
+        "discoveredSessionCount": len(discovered_ids),
+        "completedSessionCount": len(completed_ids),
+        "omittedUnitCount": len(state["omittedUnits"]),
+        "sessionCoverage": (
+            len(completed_ids) / len(discovered_ids) if discovered_ids else 1.0
+        ),
+        "primaryStrategy": "sessions_updated_at_tool_requests",
+        "targetedFallbackEnabled": state["limits"]["enableTargetedFallback"],
+        "fallbackCount": len(state["strategyHistory"]),
+        "fallbacks": state["strategyHistory"],
+        "omittedUnits": state["omittedUnits"],
+    }
+
+
+def finalize_extraction(state: dict[str, Any]) -> None:
+    state["coverage"] = extraction_coverage(state)
+    state["status"] = "partial" if state["omittedUnits"] else "complete"
+
+
 def next_action(state: dict[str, Any]) -> dict[str, Any] | None:
     validate_state_invariants(state)
     if state.get("status") != "running":
@@ -130,8 +196,42 @@ def next_action(state: dict[str, Any]) -> dict[str, Any] | None:
                     "kind": "metadata",
                     "partitionId": partition["partitionId"],
                     "batchId": batch["batchId"],
+                    "limit": len(batch["sessionIds"]),
                     "outputPath": artifact_path(state, action_id),
-                    "sql": build_metadata_query(session_ids=batch["sessionIds"]),
+                    "sql": build_metadata_query(
+                        session_ids=batch["sessionIds"],
+                        limit=len(batch["sessionIds"]),
+                    ),
+                }
+            if batch["status"] == "metadata-shutdown":
+                action_id = f"metadata-shutdown-{batch['batchId']}"
+                return {
+                    "actionId": action_id,
+                    "kind": "metadata-shutdown",
+                    "partitionId": partition["partitionId"],
+                    "batchId": batch["batchId"],
+                    "limit": 1,
+                    "outputPath": artifact_path(state, action_id),
+                    "sql": build_shutdown_query(
+                        session_id=batch["sessionIds"][0],
+                        start=partition["start"],
+                        end=partition["end"],
+                    ),
+                }
+            if batch["status"] == "metadata-events":
+                action_id = f"metadata-events-{batch['batchId']}"
+                return {
+                    "actionId": action_id,
+                    "kind": "metadata-events",
+                    "partitionId": partition["partitionId"],
+                    "batchId": batch["batchId"],
+                    "limit": 1,
+                    "outputPath": artifact_path(state, action_id),
+                    "sql": build_event_metadata_query(
+                        session_id=batch["sessionIds"][0],
+                        start=batch["fallbackStart"],
+                        end=batch["fallbackEnd"],
+                    ),
                 }
             if batch["status"] == "refs":
                 page = len(batch["refsArtifacts"])
@@ -180,13 +280,24 @@ def next_action(state: dict[str, Any]) -> dict[str, Any] | None:
                     "batchId": batch["batchId"],
                     "limit": batch["pageSize"],
                     "outputPath": artifact_path(state, action_id),
-                    "sql": build_tool_calls_query(
-                        session_ids=batch["sessionIds"],
-                        start=batch["sourceStart"],
-                        end=batch["sourceEnd"],
-                        limit=batch["pageSize"],
-                        after_session_id=cursor.get("sessionId"),
-                        after_tool_call_id=cursor.get("toolCallId"),
+                    "strategy": batch["toolStrategy"],
+                    "sql": (
+                        build_event_tool_calls_query(
+                            session_id=batch["sessionIds"][0],
+                            start=batch["sourceStart"],
+                            end=batch["sourceEnd"],
+                            limit=batch["pageSize"],
+                            after_tool_call_id=cursor.get("toolCallId"),
+                        )
+                        if batch["toolStrategy"] == "events"
+                        else build_tool_calls_query(
+                            session_ids=batch["sessionIds"],
+                            start=batch["sourceStart"],
+                            end=batch["sourceEnd"],
+                            limit=batch["pageSize"],
+                            after_session_id=cursor.get("sessionId"),
+                            after_tool_call_id=cursor.get("toolCallId"),
+                        )
                     ),
                 }
         if not partition["discoveryComplete"]:
@@ -207,7 +318,7 @@ def next_action(state: dict[str, Any]) -> dict[str, Any] | None:
                 ),
             }
         partition["status"] = "complete"
-    state["status"] = "complete"
+    finalize_extraction(state)
     return None
 
 
@@ -232,6 +343,9 @@ def make_batches(session_ids: list[str], size: int, tool_page_size: int) -> list
             "sessionIds": group,
             "status": "metadata",
             "metadataArtifact": None,
+            "metadataStrategy": "sessions",
+            "fallbackStart": None,
+            "fallbackEnd": None,
             "sourceStart": None,
             "sourceEnd": None,
             "refsArtifacts": [],
@@ -240,6 +354,7 @@ def make_batches(session_ids: list[str], size: int, tool_page_size: int) -> list
             "filesCursor": None,
             "toolArtifacts": [],
             "toolCursor": None,
+            "toolStrategy": "tool_requests",
             "pageSize": tool_page_size,
             "retryGenerations": {
                 "refs": 0,
@@ -266,7 +381,15 @@ def validate_result(
         raise ValueError("query result must be a JSON array")
     if len(rows) > state["limits"]["maxRows"]:
         raise OverflowError("row_limit_exceeded")
-    if action["kind"] in {"discovery", "refs", "files", "tool-calls"} and len(rows) > action["limit"] + 1:
+    if action["kind"] in {
+        "discovery",
+        "metadata",
+        "metadata-shutdown",
+        "metadata-events",
+        "refs",
+        "files",
+        "tool-calls",
+    } and len(rows) > action["limit"] + 1:
         raise ValueError("query returned more rows than its limit sentinel")
     return rows, artifact_bytes
 
@@ -327,7 +450,23 @@ def record_success(
         return
 
     batch = find_batch(partition, action["batchId"])
-    if action["kind"] == "metadata":
+    if action["kind"] == "metadata-shutdown":
+        if not rows:
+            raise ValueError("metadata shutdown fallback found no shutdown")
+        completed_at = rows[0].get("completed_at") if isinstance(rows[0], dict) else None
+        if not isinstance(completed_at, str):
+            raise ValueError("metadata shutdown fallback requires completed_at")
+        completed = parse_timestamp(completed_at)
+        fallback_start = completed.replace(hour=0, minute=0, second=0, microsecond=0)
+        if fallback_start == completed:
+            fallback_start -= timedelta(days=1)
+        batch["fallbackStart"] = timestamp_text(fallback_start)
+        batch["fallbackEnd"] = completed_at
+        batch["status"] = "metadata-events"
+        state["handledActionIds"].append(action["actionId"])
+        return
+
+    if action["kind"] in {"metadata", "metadata-events"}:
         expected = set(batch["sessionIds"])
         actual = {str(row.get("session_id")) for row in rows if isinstance(row, dict)}
         if actual != expected:
@@ -345,6 +484,9 @@ def record_success(
         if len(created_at_values) != len(rows) or len(updated_at_values) != len(rows):
             raise ValueError("metadata result requires created_at and updated_at for every session")
         batch["metadataArtifact"] = result_path
+        batch["metadataStrategy"] = (
+            "shutdown_day_events" if action["kind"] == "metadata-events" else "sessions"
+        )
         batch["sourceStart"] = min(created_at_values, key=parse_timestamp)
         latest_update = max(updated_at_values, key=parse_timestamp)
         batch["sourceEnd"] = timestamp_text(
@@ -408,7 +550,7 @@ def record_success(
 def split_partition(state: dict[str, Any], partition: dict[str, Any], reason: str) -> bool:
     start = parse_timestamp(partition["start"])
     end = parse_timestamp(partition["end"])
-    if end - start <= timedelta(minutes=state["limits"]["minWindowMinutes"]):
+    if end - start < timedelta(minutes=state["limits"]["minWindowMinutes"]) * 2:
         return False
     midpoint = start + (end - start) / 2
     midpoint_text = timestamp_text(midpoint)
@@ -485,6 +627,35 @@ def split_batch(state: dict[str, Any], partition: dict[str, Any], batch: dict[st
             }
         )
         return True
+    if (
+        state["limits"]["enableTargetedFallback"]
+        and batch["status"] == "tools"
+        and batch["toolStrategy"] == "tool_requests"
+    ):
+        batch["toolStrategy"] = "events"
+        batch["toolCursor"] = None
+        batch["toolArtifacts"] = []
+        batch["retryGenerations"]["tools"] += 1
+        fallback = {
+            "kind": "tool_events_fallback",
+            "batchId": batch["batchId"],
+            "sessionHash": session_hash(state, batch["sessionIds"][0]),
+            "reason": reason,
+        }
+        state["strategyHistory"].append(fallback)
+        state["retryHistory"].append(fallback)
+        return True
+    if state["limits"]["enableTargetedFallback"] and batch["status"] == "metadata":
+        batch["status"] = "metadata-shutdown"
+        fallback = {
+            "kind": "metadata_shutdown_day_fallback",
+            "batchId": batch["batchId"],
+            "sessionHash": session_hash(state, batch["sessionIds"][0]),
+            "reason": reason,
+        }
+        state["strategyHistory"].append(fallback)
+        state["retryHistory"].append(fallback)
+        return True
     return False
 
 
@@ -494,6 +665,7 @@ def record_failure(
     reason: str,
     *,
     count_attempt: bool = True,
+    allow_retry: bool = True,
 ) -> None:
     if action["actionId"] in state["handledActionIds"]:
         return
@@ -501,6 +673,22 @@ def record_failure(
         record_attempt(state)
     work_counters(state)["failedQueries"] += 1
     partition = find_partition(state, action["partitionId"])
+    retries = [
+        item
+        for item in state["retryHistory"]
+        if item.get("kind") == "retry_same_unit"
+        and item.get("actionId") == action["actionId"]
+    ]
+    if allow_retry and len(retries) < state["limits"]["maxQueryRetries"]:
+        state["retryHistory"].append(
+            {
+                "kind": "retry_same_unit",
+                "actionId": action["actionId"],
+                "retryAttempt": len(retries) + 1,
+                "reason": reason,
+            }
+        )
+        return
     recovered = False
     if action["kind"] == "discovery":
         recovered = split_partition(state, partition, reason)
@@ -512,6 +700,24 @@ def record_failure(
             reason,
         )
     if recovered:
+        state["handledActionIds"].append(action["actionId"])
+        return
+    if state["limits"]["allowPartial"] and action["kind"] != "discovery":
+        batch = find_batch(partition, action["batchId"])
+        batch["status"] = "omitted"
+        state["omittedUnits"].append(
+            {
+                "actionId": action["actionId"],
+                "kind": action["kind"],
+                "partitionId": action["partitionId"],
+                "batchId": batch["batchId"],
+                "sessionHashes": [
+                    session_hash(state, str(session_id))
+                    for session_id in batch["sessionIds"]
+                ],
+                "reason": reason,
+            }
+        )
         state["handledActionIds"].append(action["actionId"])
         return
     blocker = {
@@ -548,6 +754,12 @@ def main() -> None:
     init.add_argument("--max-rows", type=int, default=1000)
     init.add_argument("--max-artifact-bytes", type=int, default=10_000_000)
     init.add_argument("--min-window-minutes", type=int, default=15)
+    init.add_argument("--max-query-retries", type=int, default=2)
+    init.add_argument("--enable-targeted-fallback", action="store_true")
+    partial_mode = init.add_mutually_exclusive_group()
+    partial_mode.add_argument("--allow-partial", dest="allow_partial", action="store_true")
+    partial_mode.add_argument("--fail-on-omission", dest="allow_partial", action="store_false")
+    init.set_defaults(allow_partial=True)
 
     next_parser = subparsers.add_parser("next")
     next_parser.add_argument("--state", required=True)
@@ -579,6 +791,10 @@ def main() -> None:
             done = {"kind": "done", "status": state["status"]}
             if state["status"] == "blocked":
                 done["blocker"] = state["blockers"][-1]
+            if state["coverage"] is not None:
+                done["coverage"] = state["coverage"]
+            if state["status"] == "partial":
+                done["omittedUnits"] = state["omittedUnits"]
             write_json(args.out, action or done)
             return
         action = load_action(args.action)
@@ -586,7 +802,13 @@ def main() -> None:
             try:
                 record_success(state, action, args.result)
             except OverflowError as error:
-                record_failure(state, action, str(error), count_attempt=False)
+                record_failure(
+                    state,
+                    action,
+                    str(error),
+                    count_attempt=False,
+                    allow_retry=False,
+                )
         else:
             record_failure(state, action, args.reason)
         write_json(args.out, state)
