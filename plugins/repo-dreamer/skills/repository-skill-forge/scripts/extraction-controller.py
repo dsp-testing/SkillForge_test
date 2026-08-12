@@ -318,6 +318,7 @@ def next_action(state: dict[str, Any]) -> dict[str, Any] | None:
                 "limit": limits["discoveryPageSize"],
                 "outputPath": artifact_path(state, action_id),
                 "sql": build_discovery_query(
+                    repository=state["scope"]["repository"],
                     start=partition["start"],
                     end=partition["end"],
                     limit=limits["discoveryPageSize"],

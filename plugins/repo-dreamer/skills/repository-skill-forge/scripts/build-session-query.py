@@ -47,6 +47,7 @@ def main() -> None:
     parser.add_argument("--after-ref-value")
     parser.add_argument("--after-file-path")
     parser.add_argument("--after-tool-name")
+    parser.add_argument("--repository")
     parser.add_argument("--session-id", action="append", default=[])
     parser.add_argument("--session-ids-json")
     args = parser.parse_args()
@@ -62,9 +63,10 @@ def main() -> None:
 
     try:
         if args.kind == "discovery":
-            if not args.start or not args.end:
-                raise ValueError("discovery requires --start and --end")
+            if not args.repository or not args.start or not args.end:
+                raise ValueError("discovery requires --repository, --start, and --end")
             query = build_discovery_query(
+                repository=args.repository,
                 start=args.start,
                 end=args.end,
                 limit=args.limit,

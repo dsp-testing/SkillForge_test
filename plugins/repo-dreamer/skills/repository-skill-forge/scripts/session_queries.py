@@ -26,6 +26,7 @@ def sql_values(values: list[str]) -> str:
 
 def build_discovery_query(
     *,
+    repository: str,
     start: str,
     end: str,
     limit: int,
@@ -43,7 +44,8 @@ def build_discovery_query(
     agents = ",\n          ".join(f"'{agent}'" for agent in SUPPORTED_AGENTS)
     return f"""SELECT id AS session_id, agent_name, repository, branch, created_at, updated_at
 FROM sessions
-WHERE updated_at >= TIMESTAMP '{sql_literal(start)}'
+WHERE repository = '{sql_literal(repository)}'
+  AND updated_at >= TIMESTAMP '{sql_literal(start)}'
   AND updated_at < TIMESTAMP '{sql_literal(end)}'
   AND agent_name IN (
           {agents}
