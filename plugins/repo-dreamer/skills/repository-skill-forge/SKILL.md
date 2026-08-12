@@ -60,7 +60,7 @@ Create the issue only when none exists. Fail if multiple matching issues exist.
 Preserve all human-maintained issue text.
 
 Managed state uses a visible fenced code block whose info string is
-`repository-skill-forge-state:v1`, so approved GitHub MCP reads round-trip it.
+`repository-skill-forge-state:v1`, which approved GitHub MCP reads preserve.
 The parser accepts the legacy HTML-comment block only for migration; every
 render writes the visible format.
 

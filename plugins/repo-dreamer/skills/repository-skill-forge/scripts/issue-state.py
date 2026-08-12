@@ -15,15 +15,20 @@ from forge_common import parse_timestamp, read_json, write_json
 
 MARKER = "repository-skill-forge-state"
 BLOCK_RE = re.compile(
-    rf"```{MARKER}:v(?P<version>\d+)\s*\n(?P<payload>.*?)\n```",
-    re.DOTALL,
+    rf"^```{MARKER}:v(?P<version>\d+)[ \t]*\r?\n"
+    rf"(?P<payload>.*?)\r?\n```[ \t]*\r?$",
+    re.DOTALL | re.MULTILINE,
 )
-BLOCK_OPEN_RE = re.compile(rf"```{MARKER}:v")
+BLOCK_OPEN_RE = re.compile(rf"^```{MARKER}:v", re.MULTILINE)
 LEGACY_BLOCK_RE = re.compile(
-    rf"<!--\s*{MARKER}:v(?P<version>\d+)\s*\n(?P<payload>.*?)\n-->",
-    re.DOTALL,
+    rf"^<!--[ \t]*{MARKER}:v(?P<version>\d+)[ \t]*\r?\n"
+    rf"(?P<payload>.*?)\r?\n-->[ \t]*\r?$",
+    re.DOTALL | re.MULTILINE,
 )
-LEGACY_BLOCK_OPEN_RE = re.compile(rf"<!--\s*{MARKER}:v")
+LEGACY_BLOCK_OPEN_RE = re.compile(
+    rf"^<!--[ \t]*{MARKER}:v",
+    re.MULTILINE,
+)
 DEFAULT_MAX_BYTES = 60_000
 ALLOWED_TOP_LEVEL = {
     "schemaVersion",
