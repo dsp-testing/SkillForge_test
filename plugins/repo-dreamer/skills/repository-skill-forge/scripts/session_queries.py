@@ -30,11 +30,7 @@ def build_discovery_query(
     start: str,
     end: str,
     limit: int,
-    after_session_id: str | None = None,
 ) -> str:
-    cursor = ""
-    if after_session_id:
-        cursor = f"\n  AND id > '{sql_literal(after_session_id)}'"
     agents = ",\n          ".join(f"'{agent}'" for agent in SUPPORTED_AGENTS)
     return f"""SELECT id AS session_id, updated_at
 FROM sessions
@@ -43,8 +39,7 @@ WHERE repository = '{sql_literal(repository)}'
   AND updated_at < TIMESTAMP '{sql_literal(end)}'
   AND agent_name IN (
           {agents}
-      ){cursor}
-ORDER BY id
+      )
 LIMIT {limit + 1}"""
 
 

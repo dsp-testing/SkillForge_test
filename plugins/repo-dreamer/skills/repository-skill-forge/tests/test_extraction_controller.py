@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -40,8 +41,8 @@ def arguments(run_dir: str, **overrides: object) -> argparse.Namespace:
         "max_artifact_bytes": 10_000_000,
         "min_window_minutes": 15,
         "max_query_retries": 1,
-        "max_discovery_failures": 8,
-        "max_discovery_minutes": 10,
+        "max_discovery_failures": 4,
+        "max_discovery_minutes": 5,
         "allow_partial": True,
         "enable_targeted_fallback": False,
     }
@@ -56,19 +57,16 @@ def write_rows(path: str, rows: list[dict[str, object]]) -> None:
 
 
 class ExtractionControllerTests(unittest.TestCase):
-    def test_discovery_uses_narrow_id_keyset_query(self) -> None:
+    def test_discovery_uses_narrow_unordered_query(self) -> None:
         query = build_discovery_query(
             repository="owner/repository",
             start="2026-08-01T00:00:00Z",
             end="2026-08-08T00:00:00Z",
             limit=100,
-            after_session_id="session-10",
         )
 
         self.assertTrue(query.startswith("SELECT id AS session_id, updated_at"))
-        self.assertIn("AND id > 'session-10'", query)
-        self.assertIn("ORDER BY id", query)
-        self.assertNotIn("ORDER BY updated_at", query)
+        self.assertNotIn("ORDER BY", query)
         self.assertNotIn("agent_name, repository, branch", query)
 
     def test_discovery_timeout_splits_without_identical_retry(self) -> None:
@@ -85,7 +83,7 @@ class ExtractionControllerTests(unittest.TestCase):
             )
             self.assertEqual("running", state["status"])
 
-    def test_discovery_finishes_before_metadata_extraction(self) -> None:
+    def test_discovery_overflow_splits_without_accepting_rows(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(arguments(run_dir))
             discovery = controller.next_action(state)
@@ -100,10 +98,13 @@ class ExtractionControllerTests(unittest.TestCase):
             write_rows(discovery["outputPath"], rows)
             controller.record_success(state, discovery, discovery["outputPath"])
 
-            next_page = controller.next_action(state)
+            next_partition = controller.next_action(state)
 
-            self.assertEqual("discovery", next_page["kind"])
-            self.assertIn("AND id > 'session-099'", next_page["sql"])
+            self.assertEqual("discovery", next_partition["kind"])
+            self.assertEqual(2, len(state["partitions"]))
+            self.assertTrue(
+                all(not partition["sessions"] for partition in state["partitions"])
+            )
 
     def test_transient_metadata_failure_recovers_on_single_retry(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
@@ -161,6 +162,20 @@ class ExtractionControllerTests(unittest.TestCase):
                 state["blockers"][-1]["reason"],
             )
 
+    def test_legacy_state_uses_current_discovery_budget_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(arguments(run_dir))
+            del state["limits"]["maxDiscoveryFailures"]
+            del state["limits"]["maxDiscoveryMinutes"]
+            state["workCounters"]["discoveryFailures"] = 4
+
+            action = controller.next_action(state)
+
+            self.assertIsNone(action)
+            self.assertEqual("blocked", state["status"])
+            self.assertEqual(4, state["blockers"][-1]["maxFailures"])
+            self.assertEqual(5, state["blockers"][-1]["maxMinutes"])
+
     def test_nonrecoverable_discovery_error_blocks_without_splitting(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(arguments(run_dir))
@@ -179,6 +194,43 @@ class ExtractionControllerTests(unittest.TestCase):
             self.assertFalse(
                 any(item["kind"] == "split_time" for item in state["retryHistory"])
             )
+
+    def test_action_id_can_replace_missing_action_file(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(arguments(run_dir))
+            action = controller.next_action(state)
+            assert action is not None
+
+            loaded = controller.load_action(action["actionId"], state)
+
+            self.assertEqual(action, loaded)
+
+    def test_discovery_cli_rejects_session_cursor(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS_DIR / "build-session-query.py"),
+                "--kind",
+                "discovery",
+                "--repository",
+                "owner/repository",
+                "--start",
+                "2026-08-01T00:00:00Z",
+                "--end",
+                "2026-08-08T00:00:00Z",
+                "--after-session-id",
+                "session-10",
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn(
+            "discovery does not support --after-session-id",
+            result.stderr,
+        )
 
     def test_discovery_time_budget_blocks_before_another_query(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:

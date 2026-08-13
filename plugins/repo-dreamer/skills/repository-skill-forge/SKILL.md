@@ -36,8 +36,8 @@ Inputs:
 - `maxRows`: default `1000`;
 - `maxArtifactBytes`: default `10000000`;
 - `maxQueryRetries`: default `1` retry after the first attempt;
-- `maxDiscoveryFailures`: default `8`;
-- `maxDiscoveryMinutes`: default `10`;
+- `maxDiscoveryFailures`: default `4`;
+- `maxDiscoveryMinutes`: default `5`;
 - `minWindowMinutes`: default `15`;
 - `enableTargetedFallback`: default `false`;
 - `allowPartial`: default `true`;
@@ -115,9 +115,8 @@ Initialize `extraction-controller.py` with the interface defaults. Its primary
 strategy is:
 
 1. select sessions updated inside the time window, returning only `id` and
-   `updated_at`, keyset ordered by stable `id`, with pages of 100 and an exact
-   SQL repository predicate in addition to the mandatory tool-level repository
-   scope;
+   `updated_at`, without an ordered scan, with an exact SQL repository
+   predicate in addition to the mandatory tool-level repository scope;
 2. fetch exact-ID `sessions` metadata in batches of 100;
 3. fetch bounded `session_refs` and `session_files`;
 4. fetch relevant `tool_requests` with pages of 500 and time-bounded completion
@@ -127,21 +126,36 @@ Tool requests are selected by exact session ID. A session created before the
 incremental window but updated inside it must not be excluded.
 
 Do not fetch turns, assistant messages, unrelated tools, or a global shutdown
-inventory. Every paged query requests `limit + 1`. The 24-hour overlap covers
-sessions that move into the updated-time window behind an ID cursor.
+inventory. Every discovery query requests `discoveryPageSize + 1` rows. With
+the default, when 101 rows return, discard that result and split the time
+window; accept a partition only when it returns at most 100 rows. The 24-hour
+overlap covers sessions that move between time partitions while discovery is
+running.
 
 Retry only transient network, rate-limit, or server failures, at most once.
 Post-discovery timeouts may retry once; discovery timeouts never repeat the
 identical query and instead split the failing time window immediately. Syntax,
 schema, validation, authorization, and unknown failures are not retryable.
-Stop discovery with `discovery_budget_exhausted` after 8 failed discovery
-queries or 10 elapsed discovery minutes.
+Stop discovery with `discovery_budget_exhausted` after 4 failed discovery
+queries or 5 elapsed discovery minutes.
 
 Every query success or failure must be recorded through
 `extraction-controller.py`. Never retry a query manually, alter controller SQL
 ad hoc, or continue after the controller returns a blocked state.
 Complete discovery before extracting metadata and evidence so its time budget
 does not include post-discovery work.
+
+Generate each action with:
+
+```bash
+python3 "$SKILL_DIR/scripts/extraction-controller.py" next \
+  --state "$RUN_DIR/extraction-state.json" \
+  --out "$RUN_DIR/action.json"
+```
+
+Pass that action file to `record-success` or `record-failure`. If `--out` is
+accidentally omitted, `next` prints the action to stdout. `--action` also
+accepts the current action ID when the action file is unavailable.
 
 ### 4. Handle irreducible query failures
 
