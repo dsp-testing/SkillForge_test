@@ -775,6 +775,80 @@ def switch_to_shutdown_fallback(
     return True
 
 
+def activate_tool_fallback(
+    state: dict[str, Any],
+    batch: dict[str, Any],
+    reason: str,
+) -> bool:
+    if (
+        not state["limits"]["enableTargetedFallback"]
+        or batch["status"] != "tools"
+        or batch["toolStrategy"] != "tool_requests"
+        or len(batch["sessionIds"]) != 1
+    ):
+        return False
+    batch["toolStrategy"] = "events"
+    batch["toolCursor"] = None
+    batch["toolArtifacts"] = []
+    batch["retryGenerations"]["tools"] += 1
+    fallback = {
+        "kind": "tool_events_fallback",
+        "batchId": batch["batchId"],
+        "sessionHash": session_hash(state, batch["sessionIds"][0]),
+        "reason": reason,
+    }
+    state["strategyHistory"].append(fallback)
+    state["retryHistory"].append(fallback)
+    return True
+
+
+def activate_metadata_fallback(
+    state: dict[str, Any],
+    batch: dict[str, Any],
+    reason: str,
+) -> bool:
+    if (
+        not state["limits"]["enableTargetedFallback"]
+        or batch["status"] != "metadata"
+        or len(batch["sessionIds"]) != 1
+    ):
+        return False
+    batch["status"] = "metadata-shutdown"
+    fallback = {
+        "kind": "metadata_shutdown_day_fallback",
+        "batchId": batch["batchId"],
+        "sessionHash": session_hash(state, batch["sessionIds"][0]),
+        "reason": reason,
+    }
+    state["strategyHistory"].append(fallback)
+    state["retryHistory"].append(fallback)
+    return True
+
+
+def omit_batch(
+    state: dict[str, Any],
+    action: dict[str, Any],
+    partition: dict[str, Any],
+    batch: dict[str, Any],
+    reason: str,
+) -> None:
+    batch["status"] = "omitted"
+    state["omittedUnits"].append(
+        {
+            "actionId": action["actionId"],
+            "kind": action["kind"],
+            "partitionId": action["partitionId"],
+            "batchId": batch["batchId"],
+            "sessionHashes": [
+                session_hash(state, str(session_id))
+                for session_id in batch["sessionIds"]
+            ],
+            "reason": reason,
+        }
+    )
+    state["handledActionIds"].append(action["actionId"])
+
+
 def split_batch(state: dict[str, Any], partition: dict[str, Any], batch: dict[str, Any], reason: str) -> bool:
     session_ids = batch["sessionIds"]
     if len(session_ids) > 1:
@@ -818,34 +892,32 @@ def split_batch(state: dict[str, Any], partition: dict[str, Any], batch: dict[st
             }
         )
         return True
-    if (
-        state["limits"]["enableTargetedFallback"]
-        and batch["status"] == "tools"
-        and batch["toolStrategy"] == "tool_requests"
-    ):
-        batch["toolStrategy"] = "events"
-        batch["toolCursor"] = None
-        batch["toolArtifacts"] = []
-        batch["retryGenerations"]["tools"] += 1
-        fallback = {
-            "kind": "tool_events_fallback",
-            "batchId": batch["batchId"],
-            "sessionHash": session_hash(state, batch["sessionIds"][0]),
-            "reason": reason,
-        }
-        state["strategyHistory"].append(fallback)
-        state["retryHistory"].append(fallback)
-        return True
-    if state["limits"]["enableTargetedFallback"] and batch["status"] == "metadata":
-        batch["status"] = "metadata-shutdown"
-        fallback = {
-            "kind": "metadata_shutdown_day_fallback",
-            "batchId": batch["batchId"],
-            "sessionHash": session_hash(state, batch["sessionIds"][0]),
-            "reason": reason,
-        }
-        state["strategyHistory"].append(fallback)
-        state["retryHistory"].append(fallback)
+    return activate_tool_fallback(state, batch, reason) or activate_metadata_fallback(
+        state,
+        batch,
+        reason,
+    )
+
+
+def recover_extraction_timeout(
+    state: dict[str, Any],
+    action: dict[str, Any],
+    partition: dict[str, Any],
+    reason: str,
+) -> bool:
+    batch = find_batch(partition, action["batchId"])
+    if batch["status"] == "metadata":
+        if len(batch["sessionIds"]) > 1:
+            return split_batch(state, partition, batch, reason)
+        if activate_metadata_fallback(state, batch, reason):
+            return True
+    elif batch["status"] == "tools":
+        if len(batch["sessionIds"]) > 1:
+            return split_batch(state, partition, batch, reason)
+        if activate_tool_fallback(state, batch, reason):
+            return True
+    if state["limits"]["allowPartial"]:
+        omit_batch(state, action, partition, batch, reason)
         return True
     return False
 
@@ -923,6 +995,26 @@ def record_failure(
     ):
         state["handledActionIds"].append(action["actionId"])
         return
+    if (
+        action["kind"] != "discovery"
+        and resolved_error_kind == "timeout"
+    ):
+        if recover_extraction_timeout(state, action, partition, reason):
+            if action["actionId"] not in state["handledActionIds"]:
+                state["handledActionIds"].append(action["actionId"])
+            return
+        state["blockers"].append(
+            {
+                "actionId": action["actionId"],
+                "kind": action["kind"],
+                "errorKind": resolved_error_kind,
+                "reason": reason,
+            }
+        )
+        state["handledActionIds"].append(action["actionId"])
+        state["status"] = "blocked"
+        validate_state_invariants(state)
+        return
     recovered = False
     if action["kind"] == "discovery":
         recovered = (
@@ -952,21 +1044,7 @@ def record_failure(
         return
     if state["limits"]["allowPartial"] and action["kind"] != "discovery":
         batch = find_batch(partition, action["batchId"])
-        batch["status"] = "omitted"
-        state["omittedUnits"].append(
-            {
-                "actionId": action["actionId"],
-                "kind": action["kind"],
-                "partitionId": action["partitionId"],
-                "batchId": batch["batchId"],
-                "sessionHashes": [
-                    session_hash(state, str(session_id))
-                    for session_id in batch["sessionIds"]
-                ],
-                "reason": reason,
-            }
-        )
-        state["handledActionIds"].append(action["actionId"])
+        omit_batch(state, action, partition, batch, reason)
         return
     blocker = {
         "actionId": action["actionId"],
@@ -1030,7 +1108,7 @@ def retry_limit_for(
 ) -> int:
     if error_kind in {"authorization", "syntax", "schema", "validation", "other"}:
         return 0
-    if action["kind"] == "discovery":
+    if action["kind"] == "discovery" or error_kind == "timeout":
         return 0
     configured_limit = state["limits"].get("maxQueryRetries", 1)
     return min(configured_limit, 1)

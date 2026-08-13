@@ -35,7 +35,7 @@ Inputs:
 - `toolPageSize`: default `500`;
 - `maxRows`: default `1000`;
 - `maxArtifactBytes`: default `10000000`;
-- `maxQueryRetries`: default `1` retry after the first attempt;
+- `maxQueryRetries`: default `1` retry for non-timeout transient failures;
 - `minWindowMinutes`: default `15`;
 - `enableTargetedFallback`: default `false`;
 - `allowPartial`: default `true`;
@@ -131,20 +131,20 @@ discovery query requests `discoveryPageSize + 1` rows. With the default, when
 partition only when it returns at most 100 rows. The 24-hour overlap covers
 sessions that move between time partitions while discovery is running.
 
-Retry only transient network, rate-limit, or server failures, at most once.
-Post-discovery timeouts may retry once. Discovery queries never retry the same
-failed action. With `enableTargetedFallback=true`, a timeout, network,
-rate-limit, or server failure in primary discovery immediately replaces the
-failed range with UTC-day partitions that use the ordered `session.shutdown`
-inventory strategy. The `events` table has no repository column, so fallback
-uses the mandatory tool-level repository scope rather than an invalid SQL
-predicate. The fallback is paginated but each failed fallback action is
-attempted only once. A failed fallback day is immediately omitted when partial
-extraction is allowed. With fallback disabled, primary timeout and overflow
-partitions retain adaptive time splitting down to `minWindowMinutes`. Syntax,
-schema, validation, authorization, and genuinely unknown failures are not
-retryable. Discovery has no global failure-count or elapsed-time budget. With
-`--fail-on-omission`, any irreducible discovery failure blocks.
+Retry only non-timeout transient network, rate-limit, or server failures, at
+most once. No timeout repeats the identical action. With
+`enableTargetedFallback=true`, a timeout, network, rate-limit, or server failure
+in primary discovery immediately replaces the failed range with UTC-day
+partitions that use the ordered `session.shutdown` inventory strategy. The
+`events` table has no repository column, so fallback uses the mandatory
+tool-level repository scope rather than an invalid SQL predicate. The fallback
+is paginated but each failed fallback action is attempted only once. A failed
+fallback day is immediately omitted when partial extraction is allowed. With
+fallback disabled, primary timeout and overflow partitions retain adaptive time
+splitting down to `minWindowMinutes`. Syntax, schema, validation, authorization,
+and genuinely unknown failures are not retryable. Discovery has no global
+failure-count or elapsed-time budget. With `--fail-on-omission`, any
+irreducible discovery failure blocks.
 
 Every query success or failure must be recorded through
 `extraction-controller.py`. Never retry a query manually, alter controller SQL
@@ -172,8 +172,8 @@ accepts the current action ID when the action file is unavailable.
 
 Targeted shutdown/event fallback is opt-in. With the default
 `enableTargetedFallback=false`, primary discovery retains adaptive splitting,
-and an irreducible post-discovery unit is omitted after retries and adaptive
-subdivision.
+and a timed-out post-discovery unit is omitted without an identical retry or
+page-size reduction when partial mode is enabled.
 
 When `enableTargetedFallback=true`:
 
@@ -181,10 +181,14 @@ When `enableTargetedFallback=true`:
    server error switches to bounded daily, cursor-paginated
    `session.shutdown` inventory;
 2. a failed shutdown-inventory day is omitted immediately in partial mode;
-3. an irreducible tool unit may switch from `tool_requests` to bounded
-   `tool.execution_start` and `tool.execution_complete` events;
-4. an irreducible metadata unit may query the exact session's latest bounded
-   `session.shutdown`, then derive metadata from that shutdown day.
+3. a timed-out exact-session tool unit immediately switches from
+   `tool_requests` to bounded `tool.execution_start` and
+   `tool.execution_complete` events; a failed event fallback is omitted;
+4. a timed-out exact-session metadata unit immediately queries the session's
+   latest bounded `session.shutdown`, then derives metadata from that shutdown
+   day; a failed metadata fallback is omitted;
+5. timed-out `session_refs` and `session_files` units are omitted immediately
+   because reducing `LIMIT` does not avoid their expensive scan and ordering.
 
 Fallback applies only to the failed discovery range or extraction unit. It does
 not replace successful primary discovery partitions or query outside the

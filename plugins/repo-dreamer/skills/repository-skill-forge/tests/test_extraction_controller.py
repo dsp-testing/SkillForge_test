@@ -265,6 +265,139 @@ class ExtractionControllerTests(unittest.TestCase):
             self.assertEqual(1, len(retries))
             self.assertEqual("refs", state["partitions"][0]["batches"][0]["status"])
 
+    def test_metadata_timeout_switches_directly_to_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(
+                arguments(run_dir, enable_targeted_fallback=True)
+            )
+            discovery = controller.next_action(state)
+            assert discovery is not None
+            write_rows(
+                discovery["outputPath"],
+                [{"session_id": "session-1", "updated_at": "2026-08-07T12:00:00Z"}],
+            )
+            controller.record_success(state, discovery, discovery["outputPath"])
+            metadata = controller.next_action(state)
+            assert metadata is not None
+
+            controller.record_failure(state, metadata, "query timed out")
+            fallback = controller.next_action(state)
+
+            self.assertEqual("metadata-shutdown", fallback["kind"])
+            self.assertFalse(
+                any(
+                    item["kind"] == "retry_same_unit"
+                    for item in state["retryHistory"]
+                )
+            )
+
+    def test_refs_timeout_omits_batch_without_page_reduction(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(arguments(run_dir))
+            discovery = controller.next_action(state)
+            assert discovery is not None
+            write_rows(
+                discovery["outputPath"],
+                [{"session_id": "session-1", "updated_at": "2026-08-07T12:00:00Z"}],
+            )
+            controller.record_success(state, discovery, discovery["outputPath"])
+            metadata = controller.next_action(state)
+            assert metadata is not None
+            write_rows(
+                metadata["outputPath"],
+                [
+                    {
+                        "session_id": "session-1",
+                        "agent_name": "Copilot CLI",
+                        "repository": "owner/repository",
+                        "branch": "main",
+                        "created_at": "2026-08-07T10:00:00Z",
+                        "updated_at": "2026-08-07T12:00:00Z",
+                    }
+                ],
+            )
+            controller.record_success(state, metadata, metadata["outputPath"])
+            refs = controller.next_action(state)
+            assert refs is not None
+
+            controller.record_failure(state, refs, "query timed out")
+            done = controller.next_action(state)
+            batch = state["partitions"][0]["batches"][0]
+
+            self.assertIsNone(done)
+            self.assertEqual("partial", state["status"])
+            self.assertEqual("omitted", batch["status"])
+            self.assertEqual(500, batch["pageSize"])
+            self.assertFalse(
+                any(
+                    item["kind"] == "reduce_evidence_page"
+                    for item in state["retryHistory"]
+                )
+            )
+
+    def test_refs_timeout_blocks_without_page_reduction_when_omission_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(
+                arguments(run_dir, allow_partial=False)
+            )
+            discovery = controller.next_action(state)
+            assert discovery is not None
+            write_rows(
+                discovery["outputPath"],
+                [{"session_id": "session-1", "updated_at": "2026-08-07T12:00:00Z"}],
+            )
+            controller.record_success(state, discovery, discovery["outputPath"])
+            batch = state["partitions"][0]["batches"][0]
+            batch["status"] = "refs"
+            batch["sourceStart"] = "2026-08-07T10:00:00Z"
+            batch["sourceEnd"] = "2026-08-07T12:01:00Z"
+            refs = controller.next_action(state)
+            assert refs is not None
+
+            controller.record_failure(state, refs, "query timed out")
+
+            self.assertEqual("blocked", state["status"])
+            self.assertEqual(500, batch["pageSize"])
+            self.assertFalse(
+                any(
+                    item["kind"] == "reduce_evidence_page"
+                    for item in state["retryHistory"]
+                )
+            )
+
+    def test_tool_timeout_uses_event_fallback_then_omits(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(
+                arguments(run_dir, enable_targeted_fallback=True)
+            )
+            discovery = controller.next_action(state)
+            assert discovery is not None
+            write_rows(
+                discovery["outputPath"],
+                [{"session_id": "session-1", "updated_at": "2026-08-07T12:00:00Z"}],
+            )
+            controller.record_success(state, discovery, discovery["outputPath"])
+            batch = state["partitions"][0]["batches"][0]
+            batch["status"] = "tools"
+            batch["sourceStart"] = "2026-08-07T10:00:00Z"
+            batch["sourceEnd"] = "2026-08-07T12:01:00Z"
+            tools = controller.next_action(state)
+            assert tools is not None
+
+            controller.record_failure(state, tools, "query timed out")
+            fallback = controller.next_action(state)
+            assert fallback is not None
+
+            self.assertEqual("events", fallback["strategy"])
+            self.assertEqual(500, batch["pageSize"])
+
+            controller.record_failure(state, fallback, "query timed out")
+            done = controller.next_action(state)
+
+            self.assertIsNone(done)
+            self.assertEqual("partial", state["status"])
+            self.assertEqual("omitted", batch["status"])
+
     def test_discovery_continues_after_four_fallback_omissions(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(
