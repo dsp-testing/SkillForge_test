@@ -32,24 +32,39 @@ def validate_extraction(document: dict[str, Any], errors: list[str]) -> None:
     discovered = extraction.get("discoveredSessionCount")
     completed = extraction.get("completedSessionCount")
     coverage = extraction.get("sessionCoverage")
+    discovery_complete = extraction.get("discoveryComplete")
+    coverage_status = extraction.get("sessionCoverageStatus")
     omissions = extraction.get("omittedUnitCount")
     kinds = extraction.get("omittedUnitKinds")
     fallback_enabled = extraction.get("targetedFallbackEnabled")
-    if not isinstance(discovered, int) or discovered < 1:
-        errors.append("partial extraction requires a positive discoveredSessionCount")
+    if not isinstance(discovery_complete, bool):
+        errors.append("partial extraction requires discoveryComplete")
+    if not isinstance(discovered, int) or discovered < 0:
+        errors.append("partial extraction requires a non-negative discoveredSessionCount")
     if not isinstance(completed, int) or completed < 0:
         errors.append("partial extraction requires a non-negative completedSessionCount")
-    if isinstance(discovered, int) and isinstance(completed, int) and completed >= discovered:
-        errors.append("partial extraction completedSessionCount must be below discoveredSessionCount")
-    if not isinstance(coverage, (int, float)) or not 0 <= coverage < 1:
-        errors.append("partial extraction requires sessionCoverage below 1")
-    elif (
-        isinstance(discovered, int)
-        and discovered > 0
+    if (
+        discovery_complete is True
+        and isinstance(discovered, int)
         and isinstance(completed, int)
-        and abs(coverage - completed / discovered) > 1e-9
+        and completed >= discovered
     ):
-        errors.append("partial extraction sessionCoverage does not match its counts")
+        errors.append("partial extraction completedSessionCount must be below discoveredSessionCount")
+    if discovery_complete is False:
+        if coverage is not None or coverage_status != "unknown":
+            errors.append("partial discovery requires unknown sessionCoverage")
+    else:
+        if coverage_status != "known":
+            errors.append("complete discovery requires known sessionCoverage")
+        if not isinstance(coverage, (int, float)) or not 0 <= coverage < 1:
+            errors.append("partial extraction requires sessionCoverage below 1")
+        elif (
+            isinstance(discovered, int)
+            and discovered > 0
+            and isinstance(completed, int)
+            and abs(coverage - completed / discovered) > 1e-9
+        ):
+            errors.append("partial extraction sessionCoverage does not match its counts")
     if not isinstance(omissions, int) or omissions < 1:
         errors.append("partial extraction requires a positive omittedUnitCount")
     if (

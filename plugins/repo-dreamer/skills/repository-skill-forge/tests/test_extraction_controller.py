@@ -25,6 +25,14 @@ assert CONTROLLER_SPEC is not None and CONTROLLER_SPEC.loader is not None
 controller = importlib.util.module_from_spec(CONTROLLER_SPEC)
 CONTROLLER_SPEC.loader.exec_module(controller)
 
+VALIDATOR_SPEC = importlib.util.spec_from_file_location(
+    "validate_proposal",
+    SCRIPTS_DIR / "validate-proposal.py",
+)
+assert VALIDATOR_SPEC is not None and VALIDATOR_SPEC.loader is not None
+validator = importlib.util.module_from_spec(VALIDATOR_SPEC)
+VALIDATOR_SPEC.loader.exec_module(validator)
+
 
 def arguments(run_dir: str, **overrides: object) -> argparse.Namespace:
     values = {
@@ -154,6 +162,65 @@ class ExtractionControllerTests(unittest.TestCase):
             self.assertEqual(4, state["workCounters"]["failedQueries"])
             self.assertGreater(len(state["partitions"]), 4)
 
+    def test_irreducible_discovery_timeout_becomes_partial_omission(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(
+                arguments(
+                    run_dir,
+                    start="2026-08-01T00:00:00Z",
+                    end="2026-08-01T00:20:00Z",
+                    min_window_minutes=15,
+                )
+            )
+            action = controller.next_action(state)
+            assert action is not None
+
+            controller.record_failure(state, action, "query timed out")
+            done = controller.next_action(state)
+
+            self.assertIsNone(done)
+            self.assertEqual("partial", state["status"])
+            self.assertFalse(state["coverage"]["discoveryComplete"])
+            self.assertIsNone(state["coverage"]["sessionCoverage"])
+            self.assertEqual("unknown", state["coverage"]["sessionCoverageStatus"])
+            self.assertEqual("discovery", state["omittedUnits"][0]["kind"])
+            self.assertEqual(
+                "2026-08-01T00:00:00Z",
+                state["omittedUnits"][0]["windowStart"],
+            )
+
+    def test_irreducible_dense_discovery_becomes_partial_omission(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(
+                arguments(
+                    run_dir,
+                    start="2026-08-01T00:00:00Z",
+                    end="2026-08-01T00:20:00Z",
+                    min_window_minutes=15,
+                )
+            )
+            action = controller.next_action(state)
+            assert action is not None
+            write_rows(
+                action["outputPath"],
+                [
+                    {
+                        "session_id": f"session-{index:03d}",
+                        "updated_at": "2026-08-01T00:10:00Z",
+                    }
+                    for index in range(101)
+                ],
+            )
+
+            controller.record_success(state, action, action["outputPath"])
+            controller.next_action(state)
+
+            self.assertEqual("partial", state["status"])
+            self.assertEqual(
+                "discovery_partition_too_dense",
+                state["omittedUnits"][0]["reason"],
+            )
+
     def test_nonrecoverable_discovery_error_blocks_without_splitting(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(arguments(run_dir))
@@ -209,6 +276,38 @@ class ExtractionControllerTests(unittest.TestCase):
             "discovery does not support --after-session-id",
             result.stderr,
         )
+
+    def test_proposal_validator_accepts_unknown_partial_discovery_coverage(self) -> None:
+        document = {
+            "decision": "hold_as_pattern_only",
+            "proposalKey": "partial-discovery",
+            "candidateIds": ["candidate-1"],
+            "proposalVersion": "version-1",
+            "extraction": {
+                "status": "partial",
+                "discoveryComplete": False,
+                "discoveredSessionCount": 2,
+                "completedSessionCount": 2,
+                "sessionCoverage": None,
+                "sessionCoverageStatus": "unknown",
+                "omittedUnitCount": 1,
+                "omittedUnitKinds": ["discovery"],
+                "targetedFallbackEnabled": False,
+            },
+            "review": {
+                "leakageFindingCount": 0,
+                "unresolvedConflictCount": 0,
+                "executable": True,
+                "branchSpecific": False,
+            },
+            "publication": {
+                "duplicate": False,
+                "reconciled": True,
+                "action": "hold",
+            },
+        }
+
+        self.assertEqual([], validator.validate(document))
 
 if __name__ == "__main__":
     unittest.main()

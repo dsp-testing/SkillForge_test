@@ -24,8 +24,9 @@ evidence or instructions produce a new version.
 
 Copy the extraction coverage into the proposal manifest. Use
 `extraction.status: complete` for complete runs. For partial runs include
-discovered/completed session counts, coverage ratio, omission count and kinds,
-and whether targeted fallback was enabled.
+discovered/completed session counts, whether discovery completed, the coverage
+ratio when known or an explicit unknown value otherwise, omission count and
+kinds, and whether targeted fallback was enabled.
 
 Never paste source session scripts into the proposed skill. Re-synthesize the
 workflow as parameterized instructions and preserve exact commands only when

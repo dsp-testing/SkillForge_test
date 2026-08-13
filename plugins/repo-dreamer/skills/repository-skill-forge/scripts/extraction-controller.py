@@ -169,14 +169,19 @@ def extraction_coverage(state: dict[str, Any]) -> dict[str, Any]:
             if isinstance(unit, dict) and unit.get("kind")
         }
     )
+    discovery_complete = "discovery" not in omitted_unit_kinds
     return {
+        "discoveryComplete": discovery_complete,
         "discoveredSessionCount": len(discovered_ids),
         "completedSessionCount": len(completed_ids),
         "omittedUnitCount": len(state["omittedUnits"]),
         "omittedUnitKinds": omitted_unit_kinds,
         "sessionCoverage": (
-            len(completed_ids) / len(discovered_ids) if discovered_ids else 1.0
+            len(completed_ids) / len(discovered_ids)
+            if discovery_complete and discovered_ids
+            else 1.0 if discovery_complete else None
         ),
+        "sessionCoverageStatus": "known" if discovery_complete else "unknown",
         "primaryStrategy": "sessions_updated_at_tool_requests",
         "targetedFallbackEnabled": state["limits"]["enableTargetedFallback"],
         "fallbackCount": len(state["strategyHistory"]),
@@ -415,6 +420,27 @@ def record_attempt(
     counters["artifactBytes"] += artifact_bytes
 
 
+def omit_discovery_partition(
+    state: dict[str, Any],
+    action: dict[str, Any],
+    partition: dict[str, Any],
+    reason: str,
+) -> None:
+    partition["status"] = "omitted"
+    partition["discoveryComplete"] = True
+    state["omittedUnits"].append(
+        {
+            "actionId": action["actionId"],
+            "kind": action["kind"],
+            "partitionId": action["partitionId"],
+            "windowStart": partition["start"],
+            "windowEnd": partition["end"],
+            "reason": reason,
+        }
+    )
+    state["handledActionIds"].append(action["actionId"])
+
+
 def record_success(
     state: dict[str, Any],
     action: dict[str, Any],
@@ -435,6 +461,14 @@ def record_success(
         if len(rows) > action["limit"]:
             if split_partition(state, partition, "discovery_partition_overflow"):
                 state["handledActionIds"].append(action["actionId"])
+                return
+            if state["limits"]["allowPartial"]:
+                omit_discovery_partition(
+                    state,
+                    action,
+                    partition,
+                    "discovery_partition_too_dense",
+                )
                 return
             state["blockers"].append(
                 {
@@ -751,7 +785,14 @@ def record_failure(
     if recovered:
         state["handledActionIds"].append(action["actionId"])
         return
-    if state["limits"]["allowPartial"] and action["kind"] != "discovery":
+    if (
+        state["limits"]["allowPartial"]
+        and action["kind"] == "discovery"
+        and resolved_error_kind == "timeout"
+    ):
+        omit_discovery_partition(state, action, partition, reason)
+        return
+    if state["limits"]["allowPartial"]:
         batch = find_batch(partition, action["batchId"])
         batch["status"] = "omitted"
         state["omittedUnits"].append(
