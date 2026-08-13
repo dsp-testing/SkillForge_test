@@ -792,7 +792,7 @@ def record_failure(
     ):
         omit_discovery_partition(state, action, partition, reason)
         return
-    if state["limits"]["allowPartial"]:
+    if state["limits"]["allowPartial"] and action["kind"] != "discovery":
         batch = find_batch(partition, action["batchId"])
         batch["status"] = "omitted"
         state["omittedUnits"].append(
