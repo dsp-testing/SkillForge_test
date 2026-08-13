@@ -65,17 +65,31 @@
         "strategyHistory": {
           "type": "array",
           "items": {
-            "type": "object",
-            "required": ["kind", "batchId", "sessionHash", "reason"],
-            "properties": {
-              "kind": {
-                "enum": ["tool_events_fallback", "metadata_shutdown_day_fallback"]
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["kind", "partitionId", "reason"],
+                "properties": {
+                  "kind": { "const": "shutdown_discovery_fallback" },
+                  "partitionId": { "type": "string" },
+                  "reason": { "type": "string" }
+                },
+                "additionalProperties": false
               },
-              "batchId": { "type": "string" },
-              "sessionHash": { "type": "string", "pattern": "^[0-9a-f]{20}$" },
-              "reason": { "type": "string" }
-            },
-            "additionalProperties": false
+              {
+                "type": "object",
+                "required": ["kind", "batchId", "sessionHash", "reason"],
+                "properties": {
+                  "kind": {
+                    "enum": ["tool_events_fallback", "metadata_shutdown_day_fallback"]
+                  },
+                  "batchId": { "type": "string" },
+                  "sessionHash": { "type": "string", "pattern": "^[0-9a-f]{20}$" },
+                  "reason": { "type": "string" }
+                },
+                "additionalProperties": false
+              }
+            ]
           }
         },
         "blockers": { "type": "array", "items": { "type": "object" } },

@@ -19,6 +19,7 @@ from session_queries import (
     build_files_query,
     build_metadata_query,
     build_refs_query,
+    build_shutdown_discovery_query,
     build_shutdown_query,
     build_tool_calls_query,
 )
@@ -26,6 +27,47 @@ from session_queries import (
 
 def partition_id(start: str, end: str) -> str:
     return stable_hash({"start": start, "end": end}, 12)
+
+
+def make_partition(
+    start: str,
+    end: str,
+    *,
+    discovery_strategy: str = "sessions",
+) -> dict[str, Any]:
+    return {
+        "partitionId": partition_id(start, end),
+        "start": start,
+        "end": end,
+        "status": "discovering",
+        "discoveryComplete": False,
+        "discoveryStrategy": discovery_strategy,
+        "discoveryCursor": None,
+        "sessions": [],
+        "batches": [],
+    }
+
+
+def make_daily_partitions(
+    start: str,
+    end: str,
+    *,
+    discovery_strategy: str,
+) -> list[dict[str, Any]]:
+    current = parse_timestamp(start)
+    finish = parse_timestamp(end)
+    partitions = []
+    while current < finish:
+        partition_end = min(current + timedelta(days=1), finish)
+        partitions.append(
+            make_partition(
+                timestamp_text(current),
+                timestamp_text(partition_end),
+                discovery_strategy=discovery_strategy,
+            )
+        )
+        current = partition_end
+    return partitions
 
 
 def batch_id(session_ids: list[str]) -> str:
@@ -78,18 +120,7 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
             "allowPartial": args.allow_partial,
             "enableTargetedFallback": args.enable_targeted_fallback,
         },
-        "partitions": [
-            {
-                "partitionId": partition_id(args.start, args.end),
-                "start": args.start,
-                "end": args.end,
-                "status": "discovering",
-                "discoveryComplete": False,
-                "discoveryCursor": None,
-                "sessions": [],
-                "batches": [],
-            }
-        ],
+        "partitions": [make_partition(args.start, args.end)],
         "retryHistory": [],
         "strategyHistory": [],
         "blockers": [],
@@ -201,136 +232,166 @@ def next_action(state: dict[str, Any]) -> dict[str, Any] | None:
         return None
     limits = state["limits"]
     for partition in state["partitions"]:
+        for batch in partition["batches"]:
+            action = next_batch_action(state, partition, batch)
+            if action is not None:
+                return action
+        if partition["discoveryComplete"] and partition["status"] != "omitted":
+            partition["status"] = "complete"
+    for partition in state["partitions"]:
         if not partition["discoveryComplete"]:
-            action_id = f"discover-{partition['partitionId']}-{len(partition['sessions'])}"
+            cursor = partition.get("discoveryCursor") or {}
+            strategy = partition.get("discoveryStrategy", "sessions")
+            cursor_id = stable_hash(cursor, 8) if cursor else "initial"
+            action_id = (
+                f"discover-{strategy}-{partition['partitionId']}-{cursor_id}"
+            )
             return {
                 "actionId": action_id,
                 "kind": "discovery",
                 "partitionId": partition["partitionId"],
                 "limit": limits["discoveryPageSize"],
                 "outputPath": artifact_path(state, action_id),
-                "sql": build_discovery_query(
-                    repository=state["scope"]["repository"],
-                    start=partition["start"],
-                    end=partition["end"],
-                    limit=limits["discoveryPageSize"],
-                ),
-            }
-    for partition in state["partitions"]:
-        for batch in partition["batches"]:
-            if batch["status"] == "metadata":
-                action_id = f"metadata-{batch['batchId']}"
-                return {
-                    "actionId": action_id,
-                    "kind": "metadata",
-                    "partitionId": partition["partitionId"],
-                    "batchId": batch["batchId"],
-                    "limit": len(batch["sessionIds"]),
-                    "outputPath": artifact_path(state, action_id),
-                    "sql": build_metadata_query(
-                        session_ids=batch["sessionIds"],
-                        limit=len(batch["sessionIds"]),
-                    ),
-                }
-            if batch["status"] == "metadata-shutdown":
-                action_id = f"metadata-shutdown-{batch['batchId']}"
-                return {
-                    "actionId": action_id,
-                    "kind": "metadata-shutdown",
-                    "partitionId": partition["partitionId"],
-                    "batchId": batch["batchId"],
-                    "limit": 1,
-                    "outputPath": artifact_path(state, action_id),
-                    "sql": build_shutdown_query(
-                        session_id=batch["sessionIds"][0],
+                "strategy": strategy,
+                "sql": (
+                    build_shutdown_discovery_query(
+                        repository=state["scope"]["repository"],
                         start=partition["start"],
                         end=partition["end"],
-                    ),
-                }
-            if batch["status"] == "metadata-events":
-                action_id = f"metadata-events-{batch['batchId']}"
-                return {
-                    "actionId": action_id,
-                    "kind": "metadata-events",
-                    "partitionId": partition["partitionId"],
-                    "batchId": batch["batchId"],
-                    "limit": 1,
-                    "outputPath": artifact_path(state, action_id),
-                    "sql": build_event_metadata_query(
-                        session_id=batch["sessionIds"][0],
-                        start=batch["fallbackStart"],
-                        end=batch["fallbackEnd"],
-                    ),
-                }
-            if batch["status"] == "refs":
-                page = len(batch["refsArtifacts"])
-                action_id = paged_action_id("refs", batch, page)
-                return {
-                    "actionId": action_id,
-                    "kind": "refs",
-                    "partitionId": partition["partitionId"],
-                    "batchId": batch["batchId"],
-                    "limit": batch["pageSize"],
-                    "outputPath": artifact_path(state, action_id),
-                    "sql": build_refs_query(
-                        session_ids=batch["sessionIds"],
-                        start=batch["sourceStart"],
-                        end=batch["sourceEnd"],
-                        limit=batch["pageSize"],
-                        cursor=batch.get("refsCursor"),
-                    ),
-                }
-            if batch["status"] == "files":
-                page = len(batch["filesArtifacts"])
-                action_id = paged_action_id("files", batch, page)
-                return {
-                    "actionId": action_id,
-                    "kind": "files",
-                    "partitionId": partition["partitionId"],
-                    "batchId": batch["batchId"],
-                    "limit": batch["pageSize"],
-                    "outputPath": artifact_path(state, action_id),
-                    "sql": build_files_query(
-                        session_ids=batch["sessionIds"],
-                        start=batch["sourceStart"],
-                        end=batch["sourceEnd"],
-                        limit=batch["pageSize"],
-                        cursor=batch.get("filesCursor"),
-                    ),
-                }
-            if batch["status"] == "tools":
-                cursor = batch.get("toolCursor") or {}
-                page = len(batch["toolArtifacts"])
-                action_id = paged_action_id("tools", batch, page)
-                return {
-                    "actionId": action_id,
-                    "kind": "tool-calls",
-                    "partitionId": partition["partitionId"],
-                    "batchId": batch["batchId"],
-                    "limit": batch["pageSize"],
-                    "outputPath": artifact_path(state, action_id),
-                    "strategy": batch["toolStrategy"],
-                    "sql": (
-                        build_event_tool_calls_query(
-                            session_id=batch["sessionIds"][0],
-                            start=batch["sourceStart"],
-                            end=batch["sourceEnd"],
-                            limit=batch["pageSize"],
-                            after_tool_call_id=cursor.get("toolCallId"),
-                        )
-                        if batch["toolStrategy"] == "events"
-                        else build_tool_calls_query(
-                            session_ids=batch["sessionIds"],
-                            start=batch["sourceStart"],
-                            end=batch["sourceEnd"],
-                            limit=batch["pageSize"],
-                            after_session_id=cursor.get("sessionId"),
-                            after_tool_call_id=cursor.get("toolCallId"),
-                        )
-                    ),
-                }
-        partition["status"] = "complete"
+                        limit=limits["discoveryPageSize"],
+                        after_completed_at=cursor.get("completedAt"),
+                        after_session_id=cursor.get("sessionId"),
+                        after_shutdown_event_id=cursor.get("shutdownEventId"),
+                    )
+                    if strategy == "shutdown_events"
+                    else build_discovery_query(
+                        repository=state["scope"]["repository"],
+                        start=partition["start"],
+                        end=partition["end"],
+                        limit=limits["discoveryPageSize"],
+                    )
+                ),
+            }
     finalize_extraction(state)
+    return None
+
+
+def next_batch_action(
+    state: dict[str, Any],
+    partition: dict[str, Any],
+    batch: dict[str, Any],
+) -> dict[str, Any] | None:
+    if batch["status"] == "metadata":
+        action_id = f"metadata-{batch['batchId']}"
+        return {
+            "actionId": action_id,
+            "kind": "metadata",
+            "partitionId": partition["partitionId"],
+            "batchId": batch["batchId"],
+            "limit": len(batch["sessionIds"]),
+            "outputPath": artifact_path(state, action_id),
+            "sql": build_metadata_query(
+                session_ids=batch["sessionIds"],
+                limit=len(batch["sessionIds"]),
+            ),
+        }
+    if batch["status"] == "metadata-shutdown":
+        action_id = f"metadata-shutdown-{batch['batchId']}"
+        return {
+            "actionId": action_id,
+            "kind": "metadata-shutdown",
+            "partitionId": partition["partitionId"],
+            "batchId": batch["batchId"],
+            "limit": 1,
+            "outputPath": artifact_path(state, action_id),
+            "sql": build_shutdown_query(
+                session_id=batch["sessionIds"][0],
+                start=partition["start"],
+                end=partition["end"],
+            ),
+        }
+    if batch["status"] == "metadata-events":
+        action_id = f"metadata-events-{batch['batchId']}"
+        return {
+            "actionId": action_id,
+            "kind": "metadata-events",
+            "partitionId": partition["partitionId"],
+            "batchId": batch["batchId"],
+            "limit": 1,
+            "outputPath": artifact_path(state, action_id),
+            "sql": build_event_metadata_query(
+                session_id=batch["sessionIds"][0],
+                start=batch["fallbackStart"],
+                end=batch["fallbackEnd"],
+            ),
+        }
+    if batch["status"] == "refs":
+        page = len(batch["refsArtifacts"])
+        action_id = paged_action_id("refs", batch, page)
+        return {
+            "actionId": action_id,
+            "kind": "refs",
+            "partitionId": partition["partitionId"],
+            "batchId": batch["batchId"],
+            "limit": batch["pageSize"],
+            "outputPath": artifact_path(state, action_id),
+            "sql": build_refs_query(
+                session_ids=batch["sessionIds"],
+                start=batch["sourceStart"],
+                end=batch["sourceEnd"],
+                limit=batch["pageSize"],
+                cursor=batch.get("refsCursor"),
+            ),
+        }
+    if batch["status"] == "files":
+        page = len(batch["filesArtifacts"])
+        action_id = paged_action_id("files", batch, page)
+        return {
+            "actionId": action_id,
+            "kind": "files",
+            "partitionId": partition["partitionId"],
+            "batchId": batch["batchId"],
+            "limit": batch["pageSize"],
+            "outputPath": artifact_path(state, action_id),
+            "sql": build_files_query(
+                session_ids=batch["sessionIds"],
+                start=batch["sourceStart"],
+                end=batch["sourceEnd"],
+                limit=batch["pageSize"],
+                cursor=batch.get("filesCursor"),
+            ),
+        }
+    if batch["status"] == "tools":
+        cursor = batch.get("toolCursor") or {}
+        page = len(batch["toolArtifacts"])
+        action_id = paged_action_id("tools", batch, page)
+        return {
+            "actionId": action_id,
+            "kind": "tool-calls",
+            "partitionId": partition["partitionId"],
+            "batchId": batch["batchId"],
+            "limit": batch["pageSize"],
+            "outputPath": artifact_path(state, action_id),
+            "strategy": batch["toolStrategy"],
+            "sql": (
+                build_event_tool_calls_query(
+                    session_id=batch["sessionIds"][0],
+                    start=batch["sourceStart"],
+                    end=batch["sourceEnd"],
+                    limit=batch["pageSize"],
+                    after_tool_call_id=cursor.get("toolCallId"),
+                )
+                if batch["toolStrategy"] == "events"
+                else build_tool_calls_query(
+                    session_ids=batch["sessionIds"],
+                    start=batch["sourceStart"],
+                    end=batch["sourceEnd"],
+                    limit=batch["pageSize"],
+                    after_session_id=cursor.get("sessionId"),
+                    after_tool_call_id=cursor.get("toolCallId"),
+                )
+            ),
+        }
     return None
 
 
@@ -458,6 +519,72 @@ def record_success(
     counters["successfulQueries"] += 1
     partition = find_partition(state, action["partitionId"])
     if action["kind"] == "discovery":
+        strategy = action.get("strategy", "sessions")
+        if strategy == "shutdown_events":
+            accepted = rows[: action["limit"]]
+            existing_session_ids = {
+                str(session["session_id"])
+                for existing_partition in state["partitions"]
+                for session in existing_partition["sessions"]
+                if isinstance(session, dict) and session.get("session_id")
+            }
+            latest_by_session: dict[str, dict[str, Any]] = {}
+            for row in accepted:
+                required = (
+                    "session_id",
+                    "shutdown_event_id",
+                    "completed_at",
+                    "shutdown_type",
+                )
+                if not isinstance(row, dict) or any(
+                    not row.get(field) for field in required
+                ):
+                    raise ValueError(
+                        "shutdown discovery row requires complete shutdown identity"
+                    )
+                session_id = str(row["session_id"])
+                current = latest_by_session.get(session_id)
+                row_key = (
+                    parse_timestamp(str(row.get("completed_at"))),
+                    str(row.get("shutdown_event_id")),
+                )
+                current_key = (
+                    (
+                        parse_timestamp(str(current.get("completed_at"))),
+                        str(current.get("shutdown_event_id")),
+                    )
+                    if current
+                    else None
+                )
+                if current_key is None or row_key > current_key:
+                    latest_by_session[session_id] = row
+            new_rows = [
+                row
+                for session_id, row in latest_by_session.items()
+                if session_id not in existing_session_ids
+            ]
+            partition["sessions"].extend(new_rows)
+            partition["batches"].extend(
+                make_batches(
+                    [str(row["session_id"]) for row in new_rows],
+                    state["limits"]["sessionBatchSize"],
+                    state["limits"]["toolPageSize"],
+                )
+            )
+            if len(rows) > action["limit"]:
+                last = accepted[-1]
+                partition["discoveryCursor"] = {
+                    "completedAt": last["completed_at"],
+                    "sessionId": last["session_id"],
+                    "shutdownEventId": last["shutdown_event_id"],
+                }
+            else:
+                partition["discoveryComplete"] = True
+                partition["status"] = (
+                    "extracting" if partition["batches"] else "complete"
+                )
+            state["handledActionIds"].append(action["actionId"])
+            return
         if len(rows) > action["limit"]:
             if split_partition(state, partition, "discovery_partition_overflow"):
                 state["handledActionIds"].append(action["actionId"])
@@ -614,31 +741,37 @@ def split_partition(state: dict[str, Any], partition: dict[str, Any], reason: st
     midpoint = start + (end - start) / 2
     midpoint_text = timestamp_text(midpoint)
     children = [
-        {
-            "partitionId": partition_id(partition["start"], midpoint_text),
-            "start": partition["start"],
-            "end": midpoint_text,
-            "status": "discovering",
-            "discoveryComplete": False,
-            "discoveryCursor": None,
-            "sessions": [],
-            "batches": [],
-        },
-        {
-            "partitionId": partition_id(midpoint_text, partition["end"]),
-            "start": midpoint_text,
-            "end": partition["end"],
-            "status": "discovering",
-            "discoveryComplete": False,
-            "discoveryCursor": None,
-            "sessions": [],
-            "batches": [],
-        },
+        make_partition(partition["start"], midpoint_text),
+        make_partition(midpoint_text, partition["end"]),
     ]
     index = state["partitions"].index(partition)
     state["partitions"][index : index + 1] = children
     state["retryHistory"].append(
         {"kind": "split_time", "partitionId": partition["partitionId"], "reason": reason}
+    )
+    return True
+
+
+def switch_to_shutdown_fallback(
+    state: dict[str, Any],
+    partition: dict[str, Any],
+    reason: str,
+) -> bool:
+    if partition.get("discoveryStrategy", "sessions") != "sessions":
+        return False
+    replacements = make_daily_partitions(
+        partition["start"],
+        partition["end"],
+        discovery_strategy="shutdown_events",
+    )
+    index = state["partitions"].index(partition)
+    state["partitions"][index : index + 1] = replacements
+    state["strategyHistory"].append(
+        {
+            "kind": "shutdown_discovery_fallback",
+            "partitionId": partition["partitionId"],
+            "reason": reason,
+        }
     )
     return True
 
@@ -772,9 +905,22 @@ def record_failure(
         state["status"] = "blocked"
         validate_state_invariants(state)
         return
+    if (
+        action["kind"] == "discovery"
+        and resolved_error_kind == "timeout"
+        and action.get("strategy", "sessions") == "sessions"
+        and state["limits"]["enableTargetedFallback"]
+        and switch_to_shutdown_fallback(state, partition, reason)
+    ):
+        state["handledActionIds"].append(action["actionId"])
+        return
     recovered = False
     if action["kind"] == "discovery":
-        recovered = split_partition(state, partition, reason)
+        recovered = (
+            False
+            if action.get("strategy") == "shutdown_events"
+            else split_partition(state, partition, reason)
+        )
     else:
         recovered = split_batch(
             state,
@@ -788,7 +934,10 @@ def record_failure(
     if (
         state["limits"]["allowPartial"]
         and action["kind"] == "discovery"
-        and resolved_error_kind == "timeout"
+        and (
+            resolved_error_kind == "timeout"
+            or action.get("strategy") == "shutdown_events"
+        )
     ):
         omit_discovery_partition(state, action, partition, reason)
         return
@@ -858,18 +1007,9 @@ def retry_limit_for(
 ) -> int:
     if error_kind in {"authorization", "syntax", "schema", "validation", "other"}:
         return 0
-    if action["kind"] == "discovery" and error_kind == "timeout":
+    if action["kind"] == "discovery":
         return 0
     configured_limit = state["limits"].get("maxQueryRetries", 1)
-    if action["kind"] == "discovery":
-        partition_retries = sum(
-            1
-            for item in state["retryHistory"]
-            if item.get("kind") == "retry_same_unit"
-            and item.get("partitionId") == action["partitionId"]
-        )
-        if partition_retries >= 1:
-            return 0
     return min(configured_limit, 1)
 
 
