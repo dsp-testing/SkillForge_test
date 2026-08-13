@@ -9,14 +9,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = SKILL_DIR / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from forge_common import timestamp_text
 from session_queries import build_discovery_query
 
 CONTROLLER_SPEC = importlib.util.spec_from_file_location(
@@ -42,7 +40,6 @@ def arguments(run_dir: str, **overrides: object) -> argparse.Namespace:
         "min_window_minutes": 15,
         "max_query_retries": 1,
         "max_discovery_failures": 4,
-        "max_discovery_minutes": 5,
         "allow_partial": True,
         "enable_targeted_fallback": False,
     }
@@ -166,7 +163,6 @@ class ExtractionControllerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(arguments(run_dir))
             del state["limits"]["maxDiscoveryFailures"]
-            del state["limits"]["maxDiscoveryMinutes"]
             state["workCounters"]["discoveryFailures"] = 4
 
             action = controller.next_action(state)
@@ -174,7 +170,6 @@ class ExtractionControllerTests(unittest.TestCase):
             self.assertIsNone(action)
             self.assertEqual("blocked", state["status"])
             self.assertEqual(4, state["blockers"][-1]["maxFailures"])
-            self.assertEqual(5, state["blockers"][-1]["maxMinutes"])
 
     def test_nonrecoverable_discovery_error_blocks_without_splitting(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
@@ -231,23 +226,6 @@ class ExtractionControllerTests(unittest.TestCase):
             "discovery does not support --after-session-id",
             result.stderr,
         )
-
-    def test_discovery_time_budget_blocks_before_another_query(self) -> None:
-        with tempfile.TemporaryDirectory() as run_dir:
-            state = controller.initialize(arguments(run_dir))
-            state["discoveryStartedAt"] = timestamp_text(
-                datetime.now(timezone.utc) - timedelta(minutes=11)
-            )
-
-            action = controller.next_action(state)
-
-            self.assertIsNone(action)
-            self.assertEqual("blocked", state["status"])
-            self.assertEqual(
-                "discovery_budget_exhausted",
-                state["blockers"][-1]["reason"],
-            )
-
 
 if __name__ == "__main__":
     unittest.main()
