@@ -55,7 +55,9 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
         args.max_discovery_failures,
         args.max_discovery_minutes,
     ) < 1:
-        raise ValueError("page, batch, row, artifact, failure, and time limits must be positive")
+        raise ValueError(
+            "page, batch, row, artifact, window, failure, and time limits must be positive"
+        )
     if args.max_query_retries < 0:
         raise ValueError("--max-query-retries must be non-negative")
     if args.tool_page_size > args.max_rows or args.discovery_page_size > args.max_rows:
@@ -761,6 +763,25 @@ def record_failure(
                 "reason": reason,
             }
         )
+        return
+    if action["kind"] == "discovery" and resolved_error_kind in {
+        "authorization",
+        "syntax",
+        "schema",
+        "validation",
+        "other",
+    }:
+        state["blockers"].append(
+            {
+                "actionId": action["actionId"],
+                "kind": action["kind"],
+                "errorKind": resolved_error_kind,
+                "reason": reason,
+            }
+        )
+        state["handledActionIds"].append(action["actionId"])
+        state["status"] = "blocked"
+        validate_state_invariants(state)
         return
     recovered = False
     if action["kind"] == "discovery":

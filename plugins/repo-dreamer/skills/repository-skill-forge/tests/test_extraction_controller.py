@@ -161,6 +161,25 @@ class ExtractionControllerTests(unittest.TestCase):
                 state["blockers"][-1]["reason"],
             )
 
+    def test_nonrecoverable_discovery_error_blocks_without_splitting(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(arguments(run_dir))
+            action = controller.next_action(state)
+            assert action is not None
+
+            controller.record_failure(
+                state,
+                action,
+                "access denied for sessions",
+            )
+
+            self.assertEqual("blocked", state["status"])
+            self.assertEqual(1, len(state["partitions"]))
+            self.assertEqual("authorization", state["blockers"][-1]["errorKind"])
+            self.assertFalse(
+                any(item["kind"] == "split_time" for item in state["retryHistory"])
+            )
+
     def test_discovery_time_budget_blocks_before_another_query(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(arguments(run_dir))
