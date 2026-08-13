@@ -30,12 +30,14 @@ Inputs:
 - `runId`, `runDir`, and exclusive UTC `windowEnd`;
 - `initialBackfillDays`: default `7`;
 - `overlapHours`: default `24`;
-- `discoveryPageSize`: default `500`;
+- `discoveryPageSize`: default `100`;
 - `sessionBatchSize`: default `100`;
 - `toolPageSize`: default `500`;
 - `maxRows`: default `1000`;
 - `maxArtifactBytes`: default `10000000`;
-- `maxQueryRetries`: default `2` retries after the first attempt;
+- `maxQueryRetries`: default `1` retry after the first attempt;
+- `maxDiscoveryFailures`: default `8`;
+- `maxDiscoveryMinutes`: default `10`;
 - `minWindowMinutes`: default `15`;
 - `enableTargetedFallback`: default `false`;
 - `allowPartial`: default `true`;
@@ -110,11 +112,12 @@ the selected publication outcome, and the issue update all succeed.
 ### 3. Run the deployed fast extraction strategy
 
 Initialize `extraction-controller.py` with the interface defaults. Its primary
-strategy remains the deployed `83efbd19bc` approach:
+strategy is:
 
-1. discover sessions by `sessions.updated_at`, keyset ordered by
-   `(updated_at, id)`, with pages of 500 and an exact SQL repository predicate
-   in addition to the mandatory tool-level repository scope;
+1. select sessions updated inside the time window, returning only `id` and
+   `updated_at`, keyset ordered by stable `id`, with pages of 100 and an exact
+   SQL repository predicate in addition to the mandatory tool-level repository
+   scope;
 2. fetch exact-ID `sessions` metadata in batches of 100;
 3. fetch bounded `session_refs` and `session_files`;
 4. fetch relevant `tool_requests` with pages of 500 and time-bounded completion
@@ -124,13 +127,21 @@ Tool requests are selected by exact session ID. A session created before the
 incremental window but updated inside it must not be excluded.
 
 Do not fetch turns, assistant messages, unrelated tools, or a global shutdown
-inventory. Every paged query requests `limit + 1`. Retry the identical failed
-action according to `maxQueryRetries`, then split only the failing time window,
-session batch, or page.
+inventory. Every paged query requests `limit + 1`. The 24-hour overlap covers
+sessions that move into the updated-time window behind an ID cursor.
+
+Retry only transient network, rate-limit, or server failures, at most once.
+Post-discovery timeouts may retry once; discovery timeouts never repeat the
+identical query and instead split the failing time window immediately. Syntax,
+schema, validation, authorization, and unknown failures are not retryable.
+Stop discovery with `discovery_budget_exhausted` after 8 failed discovery
+queries or 10 elapsed discovery minutes.
 
 Every query success or failure must be recorded through
 `extraction-controller.py`. Never retry a query manually, alter controller SQL
 ad hoc, or continue after the controller returns a blocked state.
+Complete discovery before extracting metadata and evidence so its time budget
+does not include post-discovery work.
 
 ### 4. Handle irreducible query failures
 

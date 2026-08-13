@@ -39,7 +39,6 @@ def main() -> None:
     parser.add_argument("--start", help="Inclusive UTC timestamp")
     parser.add_argument("--end", help="Exclusive UTC timestamp")
     parser.add_argument("--limit", type=int, default=100)
-    parser.add_argument("--after-updated-at")
     parser.add_argument("--after-session-id")
     parser.add_argument("--after-tool-call-id")
     parser.add_argument("--after-turn-index", type=int)
@@ -70,7 +69,6 @@ def main() -> None:
                 start=args.start,
                 end=args.end,
                 limit=args.limit,
-                after_updated_at=args.after_updated_at,
                 after_session_id=args.after_session_id,
             )
         elif args.kind == "metadata":

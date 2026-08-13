@@ -30,19 +30,13 @@ def build_discovery_query(
     start: str,
     end: str,
     limit: int,
-    after_updated_at: str | None = None,
     after_session_id: str | None = None,
 ) -> str:
     cursor = ""
-    if after_updated_at or after_session_id:
-        if not after_updated_at or not after_session_id:
-            raise ValueError("both discovery cursor values are required")
-        cursor = (
-            "\n      AND (updated_at, id) > "
-            f"(TIMESTAMP '{sql_literal(after_updated_at)}', '{sql_literal(after_session_id)}')"
-        )
+    if after_session_id:
+        cursor = f"\n  AND id > '{sql_literal(after_session_id)}'"
     agents = ",\n          ".join(f"'{agent}'" for agent in SUPPORTED_AGENTS)
-    return f"""SELECT id AS session_id, agent_name, repository, branch, created_at, updated_at
+    return f"""SELECT id AS session_id, updated_at
 FROM sessions
 WHERE repository = '{sql_literal(repository)}'
   AND updated_at >= TIMESTAMP '{sql_literal(start)}'
@@ -50,7 +44,7 @@ WHERE repository = '{sql_literal(repository)}'
   AND agent_name IN (
           {agents}
       ){cursor}
-ORDER BY updated_at, id
+ORDER BY id
 LIMIT {limit + 1}"""
 
 
