@@ -36,7 +36,6 @@ Inputs:
 - `maxRows`: default `1000`;
 - `maxArtifactBytes`: default `10000000`;
 - `maxQueryRetries`: default `1` retry after the first attempt;
-- `maxDiscoveryFailures`: default `4`;
 - `minWindowMinutes`: default `15`;
 - `enableTargetedFallback`: default `false`;
 - `allowPartial`: default `true`;
@@ -135,8 +134,9 @@ Retry only transient network, rate-limit, or server failures, at most once.
 Post-discovery timeouts may retry once; discovery timeouts never repeat the
 identical query and instead split the failing time window immediately. Syntax,
 schema, validation, authorization, and unknown failures are not retryable.
-Stop discovery with `discovery_budget_exhausted` after 4 failed discovery
-queries. Discovery has no elapsed-time budget.
+Discovery has no global failure-count or elapsed-time budget. Timeout failures
+continue splitting only the failing time partition until it reaches
+`minWindowMinutes`; an irreducible failing partition then blocks explicitly.
 
 Every query success or failure must be recorded through
 `extraction-controller.py`. Never retry a query manually, alter controller SQL

@@ -39,7 +39,6 @@ def arguments(run_dir: str, **overrides: object) -> argparse.Namespace:
         "max_artifact_bytes": 10_000_000,
         "min_window_minutes": 15,
         "max_query_retries": 1,
-        "max_discovery_failures": 4,
         "allow_partial": True,
         "enable_targeted_fallback": False,
     }
@@ -143,33 +142,17 @@ class ExtractionControllerTests(unittest.TestCase):
             self.assertEqual(1, len(retries))
             self.assertEqual("refs", state["partitions"][0]["batches"][0]["status"])
 
-    def test_discovery_failure_budget_returns_explicit_blocker(self) -> None:
-        with tempfile.TemporaryDirectory() as run_dir:
-            state = controller.initialize(
-                arguments(run_dir, max_discovery_failures=1)
-            )
-            action = controller.next_action(state)
-            assert action is not None
-
-            controller.record_failure(state, action, "query timed out")
-
-            self.assertEqual("blocked", state["status"])
-            self.assertEqual(
-                "discovery_budget_exhausted",
-                state["blockers"][-1]["reason"],
-            )
-
-    def test_legacy_state_uses_current_discovery_budget_defaults(self) -> None:
+    def test_discovery_continues_after_four_failures(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(arguments(run_dir))
-            del state["limits"]["maxDiscoveryFailures"]
-            state["workCounters"]["discoveryFailures"] = 4
+            for _ in range(4):
+                action = controller.next_action(state)
+                assert action is not None
+                controller.record_failure(state, action, "query timed out")
 
-            action = controller.next_action(state)
-
-            self.assertIsNone(action)
-            self.assertEqual("blocked", state["status"])
-            self.assertEqual(4, state["blockers"][-1]["maxFailures"])
+            self.assertEqual("running", state["status"])
+            self.assertEqual(4, state["workCounters"]["failedQueries"])
+            self.assertGreater(len(state["partitions"]), 4)
 
     def test_nonrecoverable_discovery_error_blocks_without_splitting(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:

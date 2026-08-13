@@ -44,7 +44,6 @@
             "maxArtifactBytes",
             "minWindowMinutes",
             "maxQueryRetries",
-            "maxDiscoveryFailures",
             "allowPartial",
             "enableTargetedFallback"
           ],
@@ -56,7 +55,6 @@
             "maxArtifactBytes": { "type": "integer", "minimum": 1 },
             "minWindowMinutes": { "type": "integer", "minimum": 1 },
             "maxQueryRetries": { "type": "integer", "minimum": 0 },
-            "maxDiscoveryFailures": { "type": "integer", "minimum": 1 },
             "allowPartial": { "type": "boolean" },
             "enableTargetedFallback": { "type": "boolean" }
           },
@@ -105,12 +103,11 @@
         "handledActionIds": { "type": "array", "items": { "type": "string" } },
         "workCounters": {
           "type": "object",
-          "required": ["queryAttempts", "successfulQueries", "failedQueries", "discoveryFailures", "rows", "toolCalls", "artifactBytes"],
+          "required": ["queryAttempts", "successfulQueries", "failedQueries", "rows", "toolCalls", "artifactBytes"],
           "properties": {
             "queryAttempts": { "type": "integer", "minimum": 0 },
             "successfulQueries": { "type": "integer", "minimum": 0 },
             "failedQueries": { "type": "integer", "minimum": 0 },
-            "discoveryFailures": { "type": "integer", "minimum": 0 },
             "rows": { "type": "integer", "minimum": 0 },
             "toolCalls": { "type": "integer", "minimum": 0 },
             "artifactBytes": { "type": "integer", "minimum": 0 }
