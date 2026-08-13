@@ -45,7 +45,6 @@ LIMIT {limit + 1}"""
 
 def build_shutdown_discovery_query(
     *,
-    repository: str,
     start: str,
     end: str,
     limit: int,
@@ -73,7 +72,6 @@ def build_shutdown_discovery_query(
        timestamp AS completed_at, shutdown_type
 FROM events
 WHERE type = 'session.shutdown'
-  AND repository = '{sql_literal(repository)}'
   AND timestamp >= TIMESTAMP '{sql_literal(start)}'
   AND timestamp < TIMESTAMP '{sql_literal(end)}'
   AND agent_name IN ({agents}){cursor}
