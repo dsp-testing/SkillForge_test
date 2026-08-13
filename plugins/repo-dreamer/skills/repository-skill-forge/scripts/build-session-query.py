@@ -69,7 +69,6 @@ def main() -> None:
                 start=args.start,
                 end=args.end,
                 limit=args.limit,
-                after_session_id=args.after_session_id,
             )
         elif args.kind == "metadata":
             query = build_metadata_query(session_ids=session_ids, limit=args.limit)

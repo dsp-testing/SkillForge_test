@@ -237,18 +237,23 @@ def block_discovery_budget(
     validate_state_invariants(state)
 
 
-def next_action(state: dict[str, Any]) -> dict[str, Any] | None:
+def next_action(
+    state: dict[str, Any],
+    *,
+    enforce_discovery_budget: bool = True,
+) -> dict[str, Any] | None:
     validate_state_invariants(state)
     if state.get("status") != "running":
         return None
-    if any(not partition["discoveryComplete"] for partition in state["partitions"]):
+    if enforce_discovery_budget and any(
+        not partition["discoveryComplete"] for partition in state["partitions"]
+    ):
         if discovery_budget_exhausted(state):
             block_discovery_budget(state)
             return None
     limits = state["limits"]
     for partition in state["partitions"]:
         if not partition["discoveryComplete"]:
-            cursor = partition.get("discoveryCursor") or {}
             action_id = f"discover-{partition['partitionId']}-{len(partition['sessions'])}"
             return {
                 "actionId": action_id,
@@ -261,7 +266,6 @@ def next_action(state: dict[str, Any]) -> dict[str, Any] | None:
                     start=partition["start"],
                     end=partition["end"],
                     limit=limits["discoveryPageSize"],
-                    after_session_id=cursor.get("sessionId"),
                 ),
             }
     for partition in state["partitions"]:
@@ -485,7 +489,34 @@ def record_success(
     counters["successfulQueries"] += 1
     partition = find_partition(state, action["partitionId"])
     if action["kind"] == "discovery":
-        accepted = rows[: action["limit"]]
+        if len(rows) > action["limit"]:
+            if split_partition(state, partition, "discovery_partition_overflow"):
+                state["handledActionIds"].append(action["actionId"])
+                return
+            state["blockers"].append(
+                {
+                    "actionId": action["actionId"],
+                    "kind": action["kind"],
+                    "reason": "discovery_partition_too_dense",
+                }
+            )
+            state["handledActionIds"].append(action["actionId"])
+            state["status"] = "blocked"
+            validate_state_invariants(state)
+            return
+        existing_session_ids = {
+            str(session["session_id"])
+            for existing_partition in state["partitions"]
+            for session in existing_partition["sessions"]
+            if isinstance(session, dict) and session.get("session_id")
+        }
+        accepted = [
+            row
+            for row in rows
+            if isinstance(row, dict)
+            and row.get("session_id")
+            and str(row["session_id"]) not in existing_session_ids
+        ]
         partition["sessions"].extend(accepted)
         session_ids = [str(row["session_id"]) for row in accepted]
         partition["batches"].extend(
@@ -495,14 +526,6 @@ def record_success(
                 state["limits"]["toolPageSize"],
             )
         )
-        if len(rows) > action["limit"]:
-            last = accepted[-1]
-            partition["discoveryCursor"] = {
-                "sessionId": last["session_id"],
-            }
-            partition["status"] = "extracting"
-            state["handledActionIds"].append(action["actionId"])
-            return
         partition["discoveryComplete"] = True
         partition["status"] = "extracting" if partition["batches"] else "complete"
         state["handledActionIds"].append(action["actionId"])
@@ -877,11 +900,17 @@ def retry_limit_for(
     return min(configured_limit, 1)
 
 
-def load_action(path: str) -> dict[str, Any]:
-    action = read_json(path)
-    if not isinstance(action, dict):
-        raise ValueError("action must be a JSON object")
-    return action
+def load_action(value: str, state: dict[str, Any]) -> dict[str, Any]:
+    path = Path(value)
+    if path.is_file():
+        action = read_json(path)
+        if not isinstance(action, dict):
+            raise ValueError("action must be a JSON object")
+        return action
+    action = next_action(state, enforce_discovery_budget=False)
+    if action is not None and action.get("actionId") == value:
+        return action
+    raise ValueError(f"action file or current action ID not found: {value}")
 
 
 def main() -> None:
@@ -901,8 +930,8 @@ def main() -> None:
     init.add_argument("--max-artifact-bytes", type=int, default=10_000_000)
     init.add_argument("--min-window-minutes", type=int, default=15)
     init.add_argument("--max-query-retries", type=int, default=1)
-    init.add_argument("--max-discovery-failures", type=int, default=8)
-    init.add_argument("--max-discovery-minutes", type=int, default=10)
+    init.add_argument("--max-discovery-failures", type=int, default=4)
+    init.add_argument("--max-discovery-minutes", type=int, default=5)
     init.add_argument("--enable-targeted-fallback", action="store_true")
     partial_mode = init.add_mutually_exclusive_group()
     partial_mode.add_argument("--allow-partial", dest="allow_partial", action="store_true")
@@ -911,7 +940,7 @@ def main() -> None:
 
     next_parser = subparsers.add_parser("next")
     next_parser.add_argument("--state", required=True)
-    next_parser.add_argument("--out", required=True)
+    next_parser.add_argument("--out")
 
     success = subparsers.add_parser("record-success")
     success.add_argument("--state", required=True)
@@ -959,9 +988,13 @@ def main() -> None:
                 done["coverage"] = state["coverage"]
             if state["status"] == "partial":
                 done["omittedUnits"] = state["omittedUnits"]
-            write_json(args.out, action or done)
+            payload = action or done
+            if args.out:
+                write_json(args.out, payload)
+            else:
+                print(json.dumps(payload, indent=2))
             return
-        action = load_action(args.action)
+        action = load_action(args.action, state)
         if args.command == "record-success":
             try:
                 record_success(state, action, args.result)
