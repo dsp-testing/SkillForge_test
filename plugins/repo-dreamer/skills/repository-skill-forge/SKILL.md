@@ -123,29 +123,36 @@ strategy is:
 Tool requests are selected by exact session ID. A session created before the
 incremental window but updated inside it must not be excluded.
 
-Do not fetch turns, assistant messages, unrelated tools, or a global shutdown
-inventory. Every discovery query requests `discoveryPageSize + 1` rows. With
-the default, when 101 rows return, discard that result and split the time
-window; accept a partition only when it returns at most 100 rows. The 24-hour
-overlap covers sessions that move between time partitions while discovery is
-running.
+Do not fetch turns, assistant messages, or unrelated tools. Do not run a
+separate repository-wide count query; discovery is the authoritative inventory,
+and zero discovered sessions is a successful no-evidence outcome. Every primary
+discovery query requests `discoveryPageSize + 1` rows. With the default, when
+101 rows return, discard that result and split the time window; accept a
+partition only when it returns at most 100 rows. The 24-hour overlap covers
+sessions that move between time partitions while discovery is running.
 
 Retry only transient network, rate-limit, or server failures, at most once.
-Post-discovery timeouts may retry once; discovery timeouts never repeat the
-identical query and instead split the failing time window immediately. Syntax,
-schema, validation, authorization, and unknown failures are not retryable.
-Discovery has no global failure-count or elapsed-time budget. Timeout failures
-continue splitting only the failing time partition until it reaches
-`minWindowMinutes`. With `allowPartial=true`, an irreducible timed-out
-or over-dense partition is recorded as an omitted time window and discovery
-continues.
-With `--fail-on-omission`, it blocks.
+Post-discovery timeouts may retry once. Discovery queries never retry the same
+failed action. With `enableTargetedFallback=true`, a primary discovery timeout
+immediately replaces the failed range with UTC-day partitions that use the
+ordered `session.shutdown` inventory strategy. The fallback is paginated but
+each failed fallback action is attempted only once. A timed-out fallback day is
+immediately omitted when partial extraction is allowed. With fallback disabled,
+primary timeout and overflow partitions retain adaptive time splitting down to
+`minWindowMinutes`. Syntax, schema, validation, authorization, and unknown
+failures are not retryable. Discovery has no global failure-count or elapsed
+time budget. With `--fail-on-omission`, any irreducible discovery failure
+blocks.
 
 Every query success or failure must be recorded through
 `extraction-controller.py`. Never retry a query manually, alter controller SQL
 ad hoc, or continue after the controller returns a blocked state.
-Complete discovery before extracting metadata and evidence so its time budget
-does not include post-discovery work.
+Extract completed discovery partitions before requesting the next unresolved
+partition. This prevents slow or omitted windows from starving metadata,
+evidence analysis, candidate generation, and proposal generation for sessions
+already found. Continue invoking the controller while its state is `running`;
+the agent must not independently declare the run blocked because remaining work
+is slow or numerous.
 
 Generate each action with:
 
@@ -162,23 +169,29 @@ accepts the current action ID when the action file is unavailable.
 ### 4. Handle irreducible query failures
 
 Targeted shutdown/event fallback is opt-in. With the default
-`enableTargetedFallback=false`, an irreducible post-discovery unit is omitted
-after retries and adaptive subdivision.
+`enableTargetedFallback=false`, primary discovery retains adaptive splitting,
+and an irreducible post-discovery unit is omitted after retries and adaptive
+subdivision.
 
 When `enableTargetedFallback=true`:
 
-1. an irreducible tool unit may switch from `tool_requests` to bounded
+1. a timed-out primary discovery range switches to bounded daily,
+   cursor-paginated `session.shutdown` inventory;
+2. a failed shutdown-inventory day is omitted immediately in partial mode;
+3. an irreducible tool unit may switch from `tool_requests` to bounded
    `tool.execution_start` and `tool.execution_complete` events;
-2. an irreducible metadata unit may query the exact session's latest bounded
+4. an irreducible metadata unit may query the exact session's latest bounded
    `session.shutdown`, then derive metadata from that shutdown day.
 
-Fallback applies only to the failing unit. Never switch the run to a global
-shutdown inventory.
+Fallback applies only to the failed discovery range or extraction unit. It does
+not replace successful primary discovery partitions or query outside the
+selected evidence window.
 
 With default `allowPartial=true`, irreducible discovery windows are recorded by
 time range, and irreducible post-discovery units are recorded with
 repository-salted session hashes. Use `--fail-on-omission` for fail-closed
-behavior.
+behavior. A disclosed partial run is successful and advances durable state after
+validation, reconciliation, and the publication or no-publication decision.
 
 ### 5. Normalize, sanitize, and preserve coverage
 

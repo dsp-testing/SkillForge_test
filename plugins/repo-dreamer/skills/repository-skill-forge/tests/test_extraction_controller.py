@@ -15,7 +15,7 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = SKILL_DIR / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from session_queries import build_discovery_query
+from session_queries import build_discovery_query, build_shutdown_discovery_query
 
 CONTROLLER_SPEC = importlib.util.spec_from_file_location(
     "extraction_controller",
@@ -73,23 +73,99 @@ class ExtractionControllerTests(unittest.TestCase):
         self.assertNotIn("ORDER BY", query)
         self.assertNotIn("agent_name, repository, branch", query)
 
-    def test_discovery_timeout_splits_without_identical_retry(self) -> None:
+    def test_discovery_timeout_switches_to_daily_shutdown_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
-            state = controller.initialize(arguments(run_dir))
+            state = controller.initialize(
+                arguments(run_dir, enable_targeted_fallback=True)
+            )
             action = controller.next_action(state)
             assert action is not None
 
             controller.record_failure(state, action, "query timed out")
+            fallback = controller.next_action(state)
+            assert fallback is not None
 
-            self.assertEqual(2, len(state["partitions"]))
+            self.assertEqual(7, len(state["partitions"]))
+            self.assertEqual("shutdown_events", fallback["strategy"])
+            self.assertIn("type = 'session.shutdown'", fallback["sql"])
             self.assertFalse(
                 any(item["kind"] == "retry_same_unit" for item in state["retryHistory"])
             )
             self.assertEqual("running", state["status"])
 
+    def test_shutdown_discovery_query_is_ordered_and_cursor_bounded(self) -> None:
+        query = build_shutdown_discovery_query(
+            start="2026-08-01T00:00:00Z",
+            end="2026-08-02T00:00:00Z",
+            limit=100,
+            after_completed_at="2026-08-01T12:00:00Z",
+            after_session_id="session-1",
+            after_shutdown_event_id="event-1",
+        )
+
+        self.assertIn("type = 'session.shutdown'", query)
+        self.assertIn("ORDER BY timestamp, session_id, id", query)
+        self.assertIn("(timestamp, session_id, id) >", query)
+
+    def test_fallback_success_extracts_before_next_discovery_window(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(
+                arguments(run_dir, enable_targeted_fallback=True)
+            )
+            primary = controller.next_action(state)
+            assert primary is not None
+            controller.record_failure(state, primary, "query timed out")
+            fallback = controller.next_action(state)
+            assert fallback is not None
+            write_rows(
+                fallback["outputPath"],
+                [
+                    {
+                        "session_id": "session-1",
+                        "shutdown_event_id": "event-1",
+                        "completed_at": "2026-08-01T12:00:00Z",
+                        "shutdown_type": "completed",
+                    }
+                ],
+            )
+            controller.record_success(state, fallback, fallback["outputPath"])
+
+            next_action = controller.next_action(state)
+
+            self.assertEqual("metadata", next_action["kind"])
+            self.assertEqual(
+                ["session-1"],
+                state["partitions"][0]["batches"][0]["sessionIds"],
+            )
+            self.assertFalse(state["partitions"][1]["discoveryComplete"])
+
+    def test_fallback_timeout_omits_window_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(
+                arguments(run_dir, enable_targeted_fallback=True)
+            )
+            primary = controller.next_action(state)
+            assert primary is not None
+            controller.record_failure(state, primary, "query timed out")
+            fallback = controller.next_action(state)
+            assert fallback is not None
+
+            controller.record_failure(state, fallback, "query timed out")
+            next_action = controller.next_action(state)
+
+            self.assertEqual("omitted", state["partitions"][0]["status"])
+            self.assertEqual("discovery", state["omittedUnits"][0]["kind"])
+            self.assertEqual("shutdown_events", next_action["strategy"])
+            self.assertEqual(
+                state["partitions"][1]["partitionId"],
+                next_action["partitionId"],
+            )
+
     def test_discovery_overflow_splits_without_accepting_rows(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
-            state = controller.initialize(arguments(run_dir))
+            state = controller.initialize(
+                arguments(run_dir, enable_targeted_fallback=True)
+            )
             discovery = controller.next_action(state)
             assert discovery is not None
             rows = [
@@ -150,17 +226,23 @@ class ExtractionControllerTests(unittest.TestCase):
             self.assertEqual(1, len(retries))
             self.assertEqual("refs", state["partitions"][0]["batches"][0]["status"])
 
-    def test_discovery_continues_after_four_failures(self) -> None:
+    def test_discovery_continues_after_four_fallback_omissions(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
-            state = controller.initialize(arguments(run_dir))
+            state = controller.initialize(
+                arguments(run_dir, enable_targeted_fallback=True)
+            )
+            primary = controller.next_action(state)
+            assert primary is not None
+            controller.record_failure(state, primary, "query timed out")
             for _ in range(4):
                 action = controller.next_action(state)
                 assert action is not None
                 controller.record_failure(state, action, "query timed out")
 
             self.assertEqual("running", state["status"])
-            self.assertEqual(4, state["workCounters"]["failedQueries"])
-            self.assertGreater(len(state["partitions"]), 4)
+            self.assertEqual(5, state["workCounters"]["failedQueries"])
+            self.assertEqual(4, len(state["omittedUnits"]))
+            self.assertEqual(7, len(state["partitions"]))
 
     def test_irreducible_discovery_timeout_becomes_partial_omission(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
