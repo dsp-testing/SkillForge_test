@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -53,11 +53,8 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
         args.max_artifact_bytes,
         args.min_window_minutes,
         args.max_discovery_failures,
-        args.max_discovery_minutes,
     ) < 1:
-        raise ValueError(
-            "page, batch, row, artifact, window, failure, and time limits must be positive"
-        )
+        raise ValueError("page, batch, row, artifact, window, and failure limits must be positive")
     if args.max_query_retries < 0:
         raise ValueError("--max-query-retries must be non-negative")
     if args.tool_page_size > args.max_rows or args.discovery_page_size > args.max_rows:
@@ -80,11 +77,9 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
             "minWindowMinutes": args.min_window_minutes,
             "maxQueryRetries": args.max_query_retries,
             "maxDiscoveryFailures": args.max_discovery_failures,
-            "maxDiscoveryMinutes": args.max_discovery_minutes,
             "allowPartial": args.allow_partial,
             "enableTargetedFallback": args.enable_targeted_fallback,
         },
-        "discoveryStartedAt": timestamp_text(datetime.now(timezone.utc)),
         "partitions": [
             {
                 "partitionId": partition_id(args.start, args.end),
@@ -202,16 +197,7 @@ def finalize_extraction(state: dict[str, Any]) -> None:
 def discovery_budget_exhausted(state: dict[str, Any]) -> bool:
     limits = state["limits"]
     failures = work_counters(state).setdefault("discoveryFailures", 0)
-    if failures >= limits.get("maxDiscoveryFailures", 4):
-        return True
-    started_at = parse_timestamp(
-        state.setdefault(
-            "discoveryStartedAt",
-            timestamp_text(datetime.now(timezone.utc)),
-        )
-    )
-    elapsed = datetime.now(timezone.utc) - started_at
-    return elapsed >= timedelta(minutes=limits.get("maxDiscoveryMinutes", 5))
+    return failures >= limits.get("maxDiscoveryFailures", 4)
 
 
 def block_discovery_budget(
@@ -228,7 +214,6 @@ def block_discovery_budget(
         "reason": "discovery_budget_exhausted",
         "failureCount": work_counters(state).setdefault("discoveryFailures", 0),
         "maxFailures": state["limits"].get("maxDiscoveryFailures", 4),
-        "maxMinutes": state["limits"].get("maxDiscoveryMinutes", 5),
     }
     if last_reason:
         blocker["lastReason"] = last_reason
@@ -931,7 +916,6 @@ def main() -> None:
     init.add_argument("--min-window-minutes", type=int, default=15)
     init.add_argument("--max-query-retries", type=int, default=1)
     init.add_argument("--max-discovery-failures", type=int, default=4)
-    init.add_argument("--max-discovery-minutes", type=int, default=5)
     init.add_argument("--enable-targeted-fallback", action="store_true")
     partial_mode = init.add_mutually_exclusive_group()
     partial_mode.add_argument("--allow-partial", dest="allow_partial", action="store_true")

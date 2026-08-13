@@ -9,7 +9,6 @@
         "schemaVersion",
         "scope",
         "runDir",
-        "discoveryStartedAt",
         "limits",
         "partitions",
         "retryHistory",
@@ -35,7 +34,6 @@
           "additionalProperties": false
         },
         "runDir": { "type": "string" },
-        "discoveryStartedAt": { "type": "string" },
         "limits": {
           "type": "object",
           "required": [
@@ -47,7 +45,6 @@
             "minWindowMinutes",
             "maxQueryRetries",
             "maxDiscoveryFailures",
-            "maxDiscoveryMinutes",
             "allowPartial",
             "enableTargetedFallback"
           ],
@@ -60,7 +57,6 @@
             "minWindowMinutes": { "type": "integer", "minimum": 1 },
             "maxQueryRetries": { "type": "integer", "minimum": 0 },
             "maxDiscoveryFailures": { "type": "integer", "minimum": 1 },
-            "maxDiscoveryMinutes": { "type": "integer", "minimum": 1 },
             "allowPartial": { "type": "boolean" },
             "enableTargetedFallback": { "type": "boolean" }
           },
