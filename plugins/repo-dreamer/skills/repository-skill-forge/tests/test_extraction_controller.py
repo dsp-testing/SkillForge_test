@@ -95,6 +95,7 @@ class ExtractionControllerTests(unittest.TestCase):
 
     def test_shutdown_discovery_query_is_ordered_and_cursor_bounded(self) -> None:
         query = build_shutdown_discovery_query(
+            repository="owner/repository",
             start="2026-08-01T00:00:00Z",
             end="2026-08-02T00:00:00Z",
             limit=100,
@@ -104,6 +105,7 @@ class ExtractionControllerTests(unittest.TestCase):
         )
 
         self.assertIn("type = 'session.shutdown'", query)
+        self.assertIn("repository = 'owner/repository'", query)
         self.assertIn("ORDER BY timestamp, session_id, id", query)
         self.assertIn("(timestamp, session_id, id) >", query)
 

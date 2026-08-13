@@ -255,6 +255,7 @@ def next_action(state: dict[str, Any]) -> dict[str, Any] | None:
                 "strategy": strategy,
                 "sql": (
                     build_shutdown_discovery_query(
+                        repository=state["scope"]["repository"],
                         start=partition["start"],
                         end=partition["end"],
                         limit=limits["discoveryPageSize"],
