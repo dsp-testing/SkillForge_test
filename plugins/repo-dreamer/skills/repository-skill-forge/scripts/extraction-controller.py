@@ -866,10 +866,14 @@ def record_failure(
     work_counters(state)["failedQueries"] += 1
     partition = find_partition(state, action["partitionId"])
     inferred_error_kind = classify_error(reason)
+    transient_error_kinds = {"timeout", "network", "rate-limit", "server"}
     resolved_error_kind = (
         inferred_error_kind
         if error_kind == "auto"
-        or (error_kind == "other" and inferred_error_kind != "other")
+        or (
+            error_kind == "other"
+            and inferred_error_kind in transient_error_kinds
+        )
         else error_kind
     )
     retries = [
@@ -912,7 +916,7 @@ def record_failure(
         return
     if (
         action["kind"] == "discovery"
-        and resolved_error_kind in {"timeout", "network", "rate-limit", "server"}
+        and resolved_error_kind in transient_error_kinds
         and action.get("strategy", "sessions") == "sessions"
         and state["limits"]["enableTargetedFallback"]
         and switch_to_shutdown_fallback(state, partition, reason)

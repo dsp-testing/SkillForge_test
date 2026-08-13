@@ -128,6 +128,24 @@ class ExtractionControllerTests(unittest.TestCase):
             self.assertEqual("shutdown_events", fallback["strategy"])
             self.assertFalse(state["blockers"])
 
+    def test_explicit_other_is_not_reclassified_as_deterministic_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(
+                arguments(run_dir, enable_targeted_fallback=True)
+            )
+            primary = controller.next_action(state)
+            assert primary is not None
+
+            controller.record_failure(
+                state,
+                primary,
+                "unexpected column-shaped response",
+                error_kind="other",
+            )
+
+            self.assertEqual("blocked", state["status"])
+            self.assertEqual("other", state["blockers"][-1]["errorKind"])
+
     def test_fallback_success_extracts_before_next_discovery_window(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(

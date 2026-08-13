@@ -177,8 +177,9 @@ subdivision.
 
 When `enableTargetedFallback=true`:
 
-1. a timed-out primary discovery range switches to bounded daily,
-   cursor-paginated `session.shutdown` inventory;
+1. a primary discovery range that fails from timeout, network, rate-limit, or
+   server error switches to bounded daily, cursor-paginated
+   `session.shutdown` inventory;
 2. a failed shutdown-inventory day is omitted immediately in partial mode;
 3. an irreducible tool unit may switch from `tool_requests` to bounded
    `tool.execution_start` and `tool.execution_complete` events;
