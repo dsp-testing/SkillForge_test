@@ -52,9 +52,8 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
         args.max_rows,
         args.max_artifact_bytes,
         args.min_window_minutes,
-        args.max_discovery_failures,
     ) < 1:
-        raise ValueError("page, batch, row, artifact, window, and failure limits must be positive")
+        raise ValueError("page, batch, row, artifact, and window limits must be positive")
     if args.max_query_retries < 0:
         raise ValueError("--max-query-retries must be non-negative")
     if args.tool_page_size > args.max_rows or args.discovery_page_size > args.max_rows:
@@ -76,7 +75,6 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
             "maxArtifactBytes": args.max_artifact_bytes,
             "minWindowMinutes": args.min_window_minutes,
             "maxQueryRetries": args.max_query_retries,
-            "maxDiscoveryFailures": args.max_discovery_failures,
             "allowPartial": args.allow_partial,
             "enableTargetedFallback": args.enable_targeted_fallback,
         },
@@ -101,7 +99,6 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
             "queryAttempts": 0,
             "successfulQueries": 0,
             "failedQueries": 0,
-            "discoveryFailures": 0,
             "rows": 0,
             "toolCalls": 0,
             "artifactBytes": 0,
@@ -144,7 +141,6 @@ def work_counters(state: dict[str, Any]) -> dict[str, int]:
             "queryAttempts": 0,
             "successfulQueries": 0,
             "failedQueries": 0,
-            "discoveryFailures": 0,
             "rows": 0,
             "toolCalls": 0,
             "artifactBytes": 0,
@@ -173,14 +169,19 @@ def extraction_coverage(state: dict[str, Any]) -> dict[str, Any]:
             if isinstance(unit, dict) and unit.get("kind")
         }
     )
+    discovery_complete = "discovery" not in omitted_unit_kinds
     return {
+        "discoveryComplete": discovery_complete,
         "discoveredSessionCount": len(discovered_ids),
         "completedSessionCount": len(completed_ids),
         "omittedUnitCount": len(state["omittedUnits"]),
         "omittedUnitKinds": omitted_unit_kinds,
         "sessionCoverage": (
-            len(completed_ids) / len(discovered_ids) if discovered_ids else 1.0
+            len(completed_ids) / len(discovered_ids)
+            if discovery_complete and discovered_ids
+            else 1.0 if discovery_complete else None
         ),
+        "sessionCoverageStatus": "known" if discovery_complete else "unknown",
         "primaryStrategy": "sessions_updated_at_tool_requests",
         "targetedFallbackEnabled": state["limits"]["enableTargetedFallback"],
         "fallbackCount": len(state["strategyHistory"]),
@@ -194,48 +195,10 @@ def finalize_extraction(state: dict[str, Any]) -> None:
     state["status"] = "partial" if state["omittedUnits"] else "complete"
 
 
-def discovery_budget_exhausted(state: dict[str, Any]) -> bool:
-    limits = state["limits"]
-    failures = work_counters(state).setdefault("discoveryFailures", 0)
-    return failures >= limits.get("maxDiscoveryFailures", 4)
-
-
-def block_discovery_budget(
-    state: dict[str, Any],
-    *,
-    action_id: str = "discovery-budget",
-    last_reason: str | None = None,
-) -> None:
-    if state["status"] == "blocked":
-        return
-    blocker = {
-        "actionId": action_id,
-        "kind": "discovery",
-        "reason": "discovery_budget_exhausted",
-        "failureCount": work_counters(state).setdefault("discoveryFailures", 0),
-        "maxFailures": state["limits"].get("maxDiscoveryFailures", 4),
-    }
-    if last_reason:
-        blocker["lastReason"] = last_reason
-    state["blockers"].append(blocker)
-    state["status"] = "blocked"
-    validate_state_invariants(state)
-
-
-def next_action(
-    state: dict[str, Any],
-    *,
-    enforce_discovery_budget: bool = True,
-) -> dict[str, Any] | None:
+def next_action(state: dict[str, Any]) -> dict[str, Any] | None:
     validate_state_invariants(state)
     if state.get("status") != "running":
         return None
-    if enforce_discovery_budget and any(
-        not partition["discoveryComplete"] for partition in state["partitions"]
-    ):
-        if discovery_budget_exhausted(state):
-            block_discovery_budget(state)
-            return None
     limits = state["limits"]
     for partition in state["partitions"]:
         if not partition["discoveryComplete"]:
@@ -457,6 +420,27 @@ def record_attempt(
     counters["artifactBytes"] += artifact_bytes
 
 
+def omit_discovery_partition(
+    state: dict[str, Any],
+    action: dict[str, Any],
+    partition: dict[str, Any],
+    reason: str,
+) -> None:
+    partition["status"] = "omitted"
+    partition["discoveryComplete"] = True
+    state["omittedUnits"].append(
+        {
+            "actionId": action["actionId"],
+            "kind": action["kind"],
+            "partitionId": action["partitionId"],
+            "windowStart": partition["start"],
+            "windowEnd": partition["end"],
+            "reason": reason,
+        }
+    )
+    state["handledActionIds"].append(action["actionId"])
+
+
 def record_success(
     state: dict[str, Any],
     action: dict[str, Any],
@@ -477,6 +461,14 @@ def record_success(
         if len(rows) > action["limit"]:
             if split_partition(state, partition, "discovery_partition_overflow"):
                 state["handledActionIds"].append(action["actionId"])
+                return
+            if state["limits"]["allowPartial"]:
+                omit_discovery_partition(
+                    state,
+                    action,
+                    partition,
+                    "discovery_partition_too_dense",
+                )
                 return
             state["blockers"].append(
                 {
@@ -742,17 +734,6 @@ def record_failure(
     work_counters(state)["failedQueries"] += 1
     partition = find_partition(state, action["partitionId"])
     resolved_error_kind = classify_error(reason) if error_kind == "auto" else error_kind
-    if action["kind"] == "discovery":
-        work_counters(state).setdefault("discoveryFailures", 0)
-        work_counters(state)["discoveryFailures"] += 1
-        if discovery_budget_exhausted(state):
-            state["handledActionIds"].append(action["actionId"])
-            block_discovery_budget(
-                state,
-                action_id=action["actionId"],
-                last_reason=reason,
-            )
-            return
     retries = [
         item
         for item in state["retryHistory"]
@@ -803,6 +784,13 @@ def record_failure(
         )
     if recovered:
         state["handledActionIds"].append(action["actionId"])
+        return
+    if (
+        state["limits"]["allowPartial"]
+        and action["kind"] == "discovery"
+        and resolved_error_kind == "timeout"
+    ):
+        omit_discovery_partition(state, action, partition, reason)
         return
     if state["limits"]["allowPartial"] and action["kind"] != "discovery":
         batch = find_batch(partition, action["batchId"])
@@ -892,7 +880,7 @@ def load_action(value: str, state: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(action, dict):
             raise ValueError("action must be a JSON object")
         return action
-    action = next_action(state, enforce_discovery_budget=False)
+    action = next_action(state)
     if action is not None and action.get("actionId") == value:
         return action
     raise ValueError(f"action file or current action ID not found: {value}")
@@ -915,7 +903,6 @@ def main() -> None:
     init.add_argument("--max-artifact-bytes", type=int, default=10_000_000)
     init.add_argument("--min-window-minutes", type=int, default=15)
     init.add_argument("--max-query-retries", type=int, default=1)
-    init.add_argument("--max-discovery-failures", type=int, default=4)
     init.add_argument("--enable-targeted-fallback", action="store_true")
     partial_mode = init.add_mutually_exclusive_group()
     partial_mode.add_argument("--allow-partial", dest="allow_partial", action="store_true")

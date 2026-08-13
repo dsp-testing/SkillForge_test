@@ -36,7 +36,6 @@ Inputs:
 - `maxRows`: default `1000`;
 - `maxArtifactBytes`: default `10000000`;
 - `maxQueryRetries`: default `1` retry after the first attempt;
-- `maxDiscoveryFailures`: default `4`;
 - `minWindowMinutes`: default `15`;
 - `enableTargetedFallback`: default `false`;
 - `allowPartial`: default `true`;
@@ -135,8 +134,12 @@ Retry only transient network, rate-limit, or server failures, at most once.
 Post-discovery timeouts may retry once; discovery timeouts never repeat the
 identical query and instead split the failing time window immediately. Syntax,
 schema, validation, authorization, and unknown failures are not retryable.
-Stop discovery with `discovery_budget_exhausted` after 4 failed discovery
-queries. Discovery has no elapsed-time budget.
+Discovery has no global failure-count or elapsed-time budget. Timeout failures
+continue splitting only the failing time partition until it reaches
+`minWindowMinutes`. With `allowPartial=true`, an irreducible timed-out
+or over-dense partition is recorded as an omitted time window and discovery
+continues.
+With `--fail-on-omission`, it blocks.
 
 Every query success or failure must be recorded through
 `extraction-controller.py`. Never retry a query manually, alter controller SQL
@@ -172,9 +175,10 @@ When `enableTargetedFallback=true`:
 Fallback applies only to the failing unit. Never switch the run to a global
 shutdown inventory.
 
-Discovery is always complete or blocked. With default `allowPartial=true`,
-irreducible post-discovery units are recorded with repository-salted session
-hashes and omitted. Use `--fail-on-omission` for fail-closed behavior.
+With default `allowPartial=true`, irreducible discovery windows are recorded by
+time range, and irreducible post-discovery units are recorded with
+repository-salted session hashes. Use `--fail-on-omission` for fail-closed
+behavior.
 
 ### 5. Normalize, sanitize, and preserve coverage
 
@@ -224,7 +228,9 @@ unknown trusted-user-diversity limitation.
 For a partial run, also disclose:
 
 - discovered and completed session counts;
-- session coverage ratio and omission count;
+- whether discovery was complete;
+- session coverage ratio when known, otherwise that coverage is unknown;
+- omission count;
 - omitted unit kinds;
 - whether targeted fallback was enabled.
 
@@ -249,14 +255,15 @@ optional.
 
 ## Termination
 
-Success requires complete discovery, explicit complete-or-disclosed-partial
-coverage, sanitized compact state, stable overlap deduplication, lifecycle
+Success requires explicit complete-or-disclosed-partial discovery and
+extraction coverage, sanitized compact state, stable overlap deduplication, lifecycle
 reconciliation, no more than one PR create/update, and one successful state
 issue update.
 
-Fail explicitly on incomplete discovery, state mismatch, leakage, unsafe
+Fail explicitly on undisclosed omissions, state mismatch, leakage, unsafe
 proposal, missing label/write tools, blocked publication, or oversized state.
-Never fabricate evidence.
+Never fabricate evidence. An omitted discovery window makes total session
+coverage unknown and may permanently exclude patterns from that window.
 
 ## Assets
 
