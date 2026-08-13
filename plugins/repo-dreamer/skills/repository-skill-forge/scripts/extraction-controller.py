@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -52,8 +52,12 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
         args.max_rows,
         args.max_artifact_bytes,
         args.min_window_minutes,
+        args.max_discovery_failures,
+        args.max_discovery_minutes,
     ) < 1:
-        raise ValueError("page, batch, row, artifact, and window limits must be positive")
+        raise ValueError(
+            "page, batch, row, artifact, window, failure, and time limits must be positive"
+        )
     if args.max_query_retries < 0:
         raise ValueError("--max-query-retries must be non-negative")
     if args.tool_page_size > args.max_rows or args.discovery_page_size > args.max_rows:
@@ -75,9 +79,12 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
             "maxArtifactBytes": args.max_artifact_bytes,
             "minWindowMinutes": args.min_window_minutes,
             "maxQueryRetries": args.max_query_retries,
+            "maxDiscoveryFailures": args.max_discovery_failures,
+            "maxDiscoveryMinutes": args.max_discovery_minutes,
             "allowPartial": args.allow_partial,
             "enableTargetedFallback": args.enable_targeted_fallback,
         },
+        "discoveryStartedAt": timestamp_text(datetime.now(timezone.utc)),
         "partitions": [
             {
                 "partitionId": partition_id(args.start, args.end),
@@ -99,6 +106,7 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
             "queryAttempts": 0,
             "successfulQueries": 0,
             "failedQueries": 0,
+            "discoveryFailures": 0,
             "rows": 0,
             "toolCalls": 0,
             "artifactBytes": 0,
@@ -141,6 +149,7 @@ def work_counters(state: dict[str, Any]) -> dict[str, int]:
             "queryAttempts": 0,
             "successfulQueries": 0,
             "failedQueries": 0,
+            "discoveryFailures": 0,
             "rows": 0,
             "toolCalls": 0,
             "artifactBytes": 0,
@@ -190,11 +199,71 @@ def finalize_extraction(state: dict[str, Any]) -> None:
     state["status"] = "partial" if state["omittedUnits"] else "complete"
 
 
+def discovery_budget_exhausted(state: dict[str, Any]) -> bool:
+    limits = state["limits"]
+    failures = work_counters(state).setdefault("discoveryFailures", 0)
+    if failures >= limits.get("maxDiscoveryFailures", 8):
+        return True
+    started_at = parse_timestamp(
+        state.setdefault(
+            "discoveryStartedAt",
+            timestamp_text(datetime.now(timezone.utc)),
+        )
+    )
+    elapsed = datetime.now(timezone.utc) - started_at
+    return elapsed >= timedelta(minutes=limits.get("maxDiscoveryMinutes", 10))
+
+
+def block_discovery_budget(
+    state: dict[str, Any],
+    *,
+    action_id: str = "discovery-budget",
+    last_reason: str | None = None,
+) -> None:
+    if state["status"] == "blocked":
+        return
+    blocker = {
+        "actionId": action_id,
+        "kind": "discovery",
+        "reason": "discovery_budget_exhausted",
+        "failureCount": work_counters(state).setdefault("discoveryFailures", 0),
+        "maxFailures": state["limits"].get("maxDiscoveryFailures", 8),
+        "maxMinutes": state["limits"].get("maxDiscoveryMinutes", 10),
+    }
+    if last_reason:
+        blocker["lastReason"] = last_reason
+    state["blockers"].append(blocker)
+    state["status"] = "blocked"
+    validate_state_invariants(state)
+
+
 def next_action(state: dict[str, Any]) -> dict[str, Any] | None:
     validate_state_invariants(state)
     if state.get("status") != "running":
         return None
+    if any(not partition["discoveryComplete"] for partition in state["partitions"]):
+        if discovery_budget_exhausted(state):
+            block_discovery_budget(state)
+            return None
     limits = state["limits"]
+    for partition in state["partitions"]:
+        if not partition["discoveryComplete"]:
+            cursor = partition.get("discoveryCursor") or {}
+            action_id = f"discover-{partition['partitionId']}-{len(partition['sessions'])}"
+            return {
+                "actionId": action_id,
+                "kind": "discovery",
+                "partitionId": partition["partitionId"],
+                "limit": limits["discoveryPageSize"],
+                "outputPath": artifact_path(state, action_id),
+                "sql": build_discovery_query(
+                    repository=state["scope"]["repository"],
+                    start=partition["start"],
+                    end=partition["end"],
+                    limit=limits["discoveryPageSize"],
+                    after_session_id=cursor.get("sessionId"),
+                ),
+            }
     for partition in state["partitions"]:
         for batch in partition["batches"]:
             if batch["status"] == "metadata":
@@ -308,24 +377,6 @@ def next_action(state: dict[str, Any]) -> dict[str, Any] | None:
                         )
                     ),
                 }
-        if not partition["discoveryComplete"]:
-            cursor = partition.get("discoveryCursor") or {}
-            action_id = f"discover-{partition['partitionId']}-{len(partition['sessions'])}"
-            return {
-                "actionId": action_id,
-                "kind": "discovery",
-                "partitionId": partition["partitionId"],
-                "limit": limits["discoveryPageSize"],
-                "outputPath": artifact_path(state, action_id),
-                "sql": build_discovery_query(
-                    repository=state["scope"]["repository"],
-                    start=partition["start"],
-                    end=partition["end"],
-                    limit=limits["discoveryPageSize"],
-                    after_updated_at=cursor.get("updatedAt"),
-                    after_session_id=cursor.get("sessionId"),
-                ),
-            }
         partition["status"] = "complete"
     finalize_extraction(state)
     return None
@@ -447,7 +498,6 @@ def record_success(
         if len(rows) > action["limit"]:
             last = accepted[-1]
             partition["discoveryCursor"] = {
-                "updatedAt": last["updated_at"],
                 "sessionId": last["session_id"],
             }
             partition["status"] = "extracting"
@@ -675,6 +725,7 @@ def record_failure(
     *,
     count_attempt: bool = True,
     allow_retry: bool = True,
+    error_kind: str = "auto",
 ) -> None:
     if action["actionId"] in state["handledActionIds"]:
         return
@@ -682,21 +733,55 @@ def record_failure(
         record_attempt(state)
     work_counters(state)["failedQueries"] += 1
     partition = find_partition(state, action["partitionId"])
+    resolved_error_kind = classify_error(reason) if error_kind == "auto" else error_kind
+    if action["kind"] == "discovery":
+        work_counters(state).setdefault("discoveryFailures", 0)
+        work_counters(state)["discoveryFailures"] += 1
+        if discovery_budget_exhausted(state):
+            state["handledActionIds"].append(action["actionId"])
+            block_discovery_budget(
+                state,
+                action_id=action["actionId"],
+                last_reason=reason,
+            )
+            return
     retries = [
         item
         for item in state["retryHistory"]
         if item.get("kind") == "retry_same_unit"
         and item.get("actionId") == action["actionId"]
     ]
-    if allow_retry and len(retries) < state["limits"]["maxQueryRetries"]:
+    retry_limit = retry_limit_for(state, action, resolved_error_kind)
+    if allow_retry and len(retries) < retry_limit:
         state["retryHistory"].append(
             {
                 "kind": "retry_same_unit",
                 "actionId": action["actionId"],
+                "partitionId": action["partitionId"],
                 "retryAttempt": len(retries) + 1,
+                "errorKind": resolved_error_kind,
                 "reason": reason,
             }
         )
+        return
+    if action["kind"] == "discovery" and resolved_error_kind in {
+        "authorization",
+        "syntax",
+        "schema",
+        "validation",
+        "other",
+    }:
+        state["blockers"].append(
+            {
+                "actionId": action["actionId"],
+                "kind": action["kind"],
+                "errorKind": resolved_error_kind,
+                "reason": reason,
+            }
+        )
+        state["handledActionIds"].append(action["actionId"])
+        state["status"] = "blocked"
+        validate_state_invariants(state)
         return
     recovered = False
     if action["kind"] == "discovery":
@@ -740,6 +825,58 @@ def record_failure(
     validate_state_invariants(state)
 
 
+def classify_error(reason: str) -> str:
+    normalized = reason.lower()
+    if any(token in normalized for token in ("unauthorized", "forbidden", "permission", "access denied")):
+        return "authorization"
+    if any(token in normalized for token in ("rate limit", "too many requests", "429")):
+        return "rate-limit"
+    if any(
+        token in normalized
+        for token in (
+            "timed out",
+            "timeout",
+            "deadline exceeded",
+            "maximum allowed runtime",
+            "runtime limit",
+        )
+    ):
+        return "timeout"
+    if any(token in normalized for token in ("connection", "network", "temporarily unavailable")):
+        return "network"
+    if any(token in normalized for token in ("500", "502", "503", "504", "server error")):
+        return "server"
+    if any(token in normalized for token in ("syntax", "parser error", "parse error")):
+        return "syntax"
+    if any(token in normalized for token in ("schema", "column", "table", "catalog")):
+        return "schema"
+    if any(token in normalized for token in ("validation", "invalid", "malformed")):
+        return "validation"
+    return "other"
+
+
+def retry_limit_for(
+    state: dict[str, Any],
+    action: dict[str, Any],
+    error_kind: str,
+) -> int:
+    if error_kind in {"authorization", "syntax", "schema", "validation", "other"}:
+        return 0
+    if action["kind"] == "discovery" and error_kind == "timeout":
+        return 0
+    configured_limit = state["limits"].get("maxQueryRetries", 1)
+    if action["kind"] == "discovery":
+        partition_retries = sum(
+            1
+            for item in state["retryHistory"]
+            if item.get("kind") == "retry_same_unit"
+            and item.get("partitionId") == action["partitionId"]
+        )
+        if partition_retries >= 1:
+            return 0
+    return min(configured_limit, 1)
+
+
 def load_action(path: str) -> dict[str, Any]:
     action = read_json(path)
     if not isinstance(action, dict):
@@ -757,13 +894,15 @@ def main() -> None:
     init.add_argument("--start", required=True)
     init.add_argument("--end", required=True)
     init.add_argument("--run-dir", required=True)
-    init.add_argument("--discovery-page-size", type=int, default=500)
+    init.add_argument("--discovery-page-size", type=int, default=100)
     init.add_argument("--session-batch-size", type=int, default=100)
     init.add_argument("--tool-page-size", type=int, default=500)
     init.add_argument("--max-rows", type=int, default=1000)
     init.add_argument("--max-artifact-bytes", type=int, default=10_000_000)
     init.add_argument("--min-window-minutes", type=int, default=15)
-    init.add_argument("--max-query-retries", type=int, default=2)
+    init.add_argument("--max-query-retries", type=int, default=1)
+    init.add_argument("--max-discovery-failures", type=int, default=8)
+    init.add_argument("--max-discovery-minutes", type=int, default=10)
     init.add_argument("--enable-targeted-fallback", action="store_true")
     partial_mode = init.add_mutually_exclusive_group()
     partial_mode.add_argument("--allow-partial", dest="allow_partial", action="store_true")
@@ -784,6 +923,22 @@ def main() -> None:
     failure.add_argument("--state", required=True)
     failure.add_argument("--action", required=True)
     failure.add_argument("--reason", required=True)
+    failure.add_argument(
+        "--error-kind",
+        choices=(
+            "auto",
+            "timeout",
+            "network",
+            "rate-limit",
+            "server",
+            "syntax",
+            "schema",
+            "validation",
+            "authorization",
+            "other",
+        ),
+        default="auto",
+    )
     failure.add_argument("--out", required=True)
 
     args = parser.parse_args()
@@ -819,7 +974,7 @@ def main() -> None:
                     allow_retry=False,
                 )
         else:
-            record_failure(state, action, args.reason)
+            record_failure(state, action, args.reason, error_kind=args.error_kind)
         write_json(args.out, state)
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise SystemExit(str(error)) from error
