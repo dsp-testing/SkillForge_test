@@ -255,7 +255,6 @@ def next_action(state: dict[str, Any]) -> dict[str, Any] | None:
                 "strategy": strategy,
                 "sql": (
                     build_shutdown_discovery_query(
-                        repository=state["scope"]["repository"],
                         start=partition["start"],
                         end=partition["end"],
                         limit=limits["discoveryPageSize"],
@@ -866,7 +865,17 @@ def record_failure(
         record_attempt(state)
     work_counters(state)["failedQueries"] += 1
     partition = find_partition(state, action["partitionId"])
-    resolved_error_kind = classify_error(reason) if error_kind == "auto" else error_kind
+    inferred_error_kind = classify_error(reason)
+    transient_error_kinds = {"timeout", "network", "rate-limit", "server"}
+    resolved_error_kind = (
+        inferred_error_kind
+        if error_kind == "auto"
+        or (
+            error_kind == "other"
+            and inferred_error_kind in transient_error_kinds
+        )
+        else error_kind
+    )
     retries = [
         item
         for item in state["retryHistory"]
@@ -907,7 +916,7 @@ def record_failure(
         return
     if (
         action["kind"] == "discovery"
-        and resolved_error_kind == "timeout"
+        and resolved_error_kind in transient_error_kinds
         and action.get("strategy", "sessions") == "sessions"
         and state["limits"]["enableTargetedFallback"]
         and switch_to_shutdown_fallback(state, partition, reason)
@@ -989,7 +998,21 @@ def classify_error(reason: str) -> str:
         return "timeout"
     if any(token in normalized for token in ("connection", "network", "temporarily unavailable")):
         return "network"
-    if any(token in normalized for token in ("500", "502", "503", "504", "server error")):
+    if any(
+        token in normalized
+        for token in (
+            "500",
+            "502",
+            "503",
+            "504",
+            "server error",
+            "internal server error",
+            "service unavailable",
+            "bad gateway",
+            "gateway timeout",
+            "github unicorn",
+        )
+    ):
         return "server"
     if any(token in normalized for token in ("syntax", "parser error", "parse error")):
         return "syntax"

@@ -95,7 +95,6 @@ class ExtractionControllerTests(unittest.TestCase):
 
     def test_shutdown_discovery_query_is_ordered_and_cursor_bounded(self) -> None:
         query = build_shutdown_discovery_query(
-            repository="owner/repository",
             start="2026-08-01T00:00:00Z",
             end="2026-08-02T00:00:00Z",
             limit=100,
@@ -105,9 +104,47 @@ class ExtractionControllerTests(unittest.TestCase):
         )
 
         self.assertIn("type = 'session.shutdown'", query)
-        self.assertIn("repository = 'owner/repository'", query)
+        self.assertNotIn("repository =", query)
         self.assertIn("ORDER BY timestamp, session_id, id", query)
         self.assertIn("(timestamp, session_id, id) >", query)
+
+    def test_unicorn_discovery_failure_switches_to_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(
+                arguments(run_dir, enable_targeted_fallback=True)
+            )
+            primary = controller.next_action(state)
+            assert primary is not None
+
+            controller.record_failure(
+                state,
+                primary,
+                "SQL Error: GitHub Unicorn HTML response",
+                error_kind="other",
+            )
+            fallback = controller.next_action(state)
+
+            self.assertEqual("running", state["status"])
+            self.assertEqual("shutdown_events", fallback["strategy"])
+            self.assertFalse(state["blockers"])
+
+    def test_explicit_other_is_not_reclassified_as_deterministic_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(
+                arguments(run_dir, enable_targeted_fallback=True)
+            )
+            primary = controller.next_action(state)
+            assert primary is not None
+
+            controller.record_failure(
+                state,
+                primary,
+                "unexpected column-shaped response",
+                error_kind="other",
+            )
+
+            self.assertEqual("blocked", state["status"])
+            self.assertEqual("other", state["blockers"][-1]["errorKind"])
 
     def test_fallback_success_extracts_before_next_discovery_window(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:

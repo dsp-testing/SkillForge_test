@@ -133,17 +133,18 @@ sessions that move between time partitions while discovery is running.
 
 Retry only transient network, rate-limit, or server failures, at most once.
 Post-discovery timeouts may retry once. Discovery queries never retry the same
-failed action. With `enableTargetedFallback=true`, a primary discovery timeout
-immediately replaces the failed range with UTC-day partitions that use the
-ordered `session.shutdown` inventory strategy with the same explicit SQL
-repository predicate and mandatory tool-level repository scope. The fallback
-is paginated but each failed fallback action is attempted only once. A timed-out
-fallback day is immediately omitted when partial extraction is allowed. With
-fallback disabled, primary timeout and overflow partitions retain adaptive time
-splitting down to `minWindowMinutes`. Syntax, schema, validation, authorization,
-and unknown failures are not retryable. Discovery has no global failure-count
-or elapsed time budget. With `--fail-on-omission`, any irreducible discovery
-failure blocks.
+failed action. With `enableTargetedFallback=true`, a timeout, network,
+rate-limit, or server failure in primary discovery immediately replaces the
+failed range with UTC-day partitions that use the ordered `session.shutdown`
+inventory strategy. The `events` table has no repository column, so fallback
+uses the mandatory tool-level repository scope rather than an invalid SQL
+predicate. The fallback is paginated but each failed fallback action is
+attempted only once. A failed fallback day is immediately omitted when partial
+extraction is allowed. With fallback disabled, primary timeout and overflow
+partitions retain adaptive time splitting down to `minWindowMinutes`. Syntax,
+schema, validation, authorization, and genuinely unknown failures are not
+retryable. Discovery has no global failure-count or elapsed-time budget. With
+`--fail-on-omission`, any irreducible discovery failure blocks.
 
 Every query success or failure must be recorded through
 `extraction-controller.py`. Never retry a query manually, alter controller SQL
@@ -176,8 +177,9 @@ subdivision.
 
 When `enableTargetedFallback=true`:
 
-1. a timed-out primary discovery range switches to bounded daily,
-   cursor-paginated `session.shutdown` inventory;
+1. a primary discovery range that fails from timeout, network, rate-limit, or
+   server error switches to bounded daily, cursor-paginated
+   `session.shutdown` inventory;
 2. a failed shutdown-inventory day is omitted immediately in partial mode;
 3. an irreducible tool unit may switch from `tool_requests` to bounded
    `tool.execution_start` and `tool.execution_complete` events;
