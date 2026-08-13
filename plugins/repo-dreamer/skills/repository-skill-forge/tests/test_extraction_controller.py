@@ -282,6 +282,7 @@ class ExtractionControllerTests(unittest.TestCase):
 
             controller.record_failure(state, metadata, "query timed out")
             fallback = controller.next_action(state)
+            assert fallback is not None
 
             self.assertEqual("metadata-shutdown", fallback["kind"])
             self.assertFalse(
