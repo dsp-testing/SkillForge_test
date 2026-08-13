@@ -64,6 +64,8 @@ def main() -> None:
         if args.kind == "discovery":
             if not args.repository or not args.start or not args.end:
                 raise ValueError("discovery requires --repository, --start, and --end")
+            if args.after_session_id:
+                raise ValueError("discovery does not support --after-session-id")
             query = build_discovery_query(
                 repository=args.repository,
                 start=args.start,

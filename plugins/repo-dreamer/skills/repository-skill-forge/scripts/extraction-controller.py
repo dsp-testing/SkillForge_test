@@ -202,7 +202,7 @@ def finalize_extraction(state: dict[str, Any]) -> None:
 def discovery_budget_exhausted(state: dict[str, Any]) -> bool:
     limits = state["limits"]
     failures = work_counters(state).setdefault("discoveryFailures", 0)
-    if failures >= limits.get("maxDiscoveryFailures", 8):
+    if failures >= limits.get("maxDiscoveryFailures", 4):
         return True
     started_at = parse_timestamp(
         state.setdefault(
@@ -211,7 +211,7 @@ def discovery_budget_exhausted(state: dict[str, Any]) -> bool:
         )
     )
     elapsed = datetime.now(timezone.utc) - started_at
-    return elapsed >= timedelta(minutes=limits.get("maxDiscoveryMinutes", 10))
+    return elapsed >= timedelta(minutes=limits.get("maxDiscoveryMinutes", 5))
 
 
 def block_discovery_budget(
@@ -227,8 +227,8 @@ def block_discovery_budget(
         "kind": "discovery",
         "reason": "discovery_budget_exhausted",
         "failureCount": work_counters(state).setdefault("discoveryFailures", 0),
-        "maxFailures": state["limits"].get("maxDiscoveryFailures", 8),
-        "maxMinutes": state["limits"].get("maxDiscoveryMinutes", 10),
+        "maxFailures": state["limits"].get("maxDiscoveryFailures", 4),
+        "maxMinutes": state["limits"].get("maxDiscoveryMinutes", 5),
     }
     if last_reason:
         blocker["lastReason"] = last_reason

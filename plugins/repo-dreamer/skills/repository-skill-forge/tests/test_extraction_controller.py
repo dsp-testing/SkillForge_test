@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -161,6 +162,20 @@ class ExtractionControllerTests(unittest.TestCase):
                 state["blockers"][-1]["reason"],
             )
 
+    def test_legacy_state_uses_current_discovery_budget_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(arguments(run_dir))
+            del state["limits"]["maxDiscoveryFailures"]
+            del state["limits"]["maxDiscoveryMinutes"]
+            state["workCounters"]["discoveryFailures"] = 4
+
+            action = controller.next_action(state)
+
+            self.assertIsNone(action)
+            self.assertEqual("blocked", state["status"])
+            self.assertEqual(4, state["blockers"][-1]["maxFailures"])
+            self.assertEqual(5, state["blockers"][-1]["maxMinutes"])
+
     def test_nonrecoverable_discovery_error_blocks_without_splitting(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(arguments(run_dir))
@@ -189,6 +204,33 @@ class ExtractionControllerTests(unittest.TestCase):
             loaded = controller.load_action(action["actionId"], state)
 
             self.assertEqual(action, loaded)
+
+    def test_discovery_cli_rejects_session_cursor(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS_DIR / "build-session-query.py"),
+                "--kind",
+                "discovery",
+                "--repository",
+                "owner/repository",
+                "--start",
+                "2026-08-01T00:00:00Z",
+                "--end",
+                "2026-08-08T00:00:00Z",
+                "--after-session-id",
+                "session-10",
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn(
+            "discovery does not support --after-session-id",
+            result.stderr,
+        )
 
     def test_discovery_time_budget_blocks_before_another_query(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
