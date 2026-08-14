@@ -220,6 +220,71 @@ class ExtractionControllerTests(unittest.TestCase):
                 next_action["partitionId"],
             )
 
+    def test_fallback_split_uses_hourly_edge_partitions(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(
+                arguments(
+                    run_dir,
+                    start="2026-08-01T00:00:00Z",
+                    end="2026-08-01T02:30:00Z",
+                    enable_targeted_fallback=True,
+                )
+            )
+            primary = controller.next_action(state)
+            assert primary is not None
+            controller.record_failure(state, primary, "query timed out")
+            fallback = controller.next_action(state)
+            assert fallback is not None
+
+            controller.record_failure(state, fallback, "query timed out")
+
+            self.assertEqual(
+                [
+                    ("2026-08-01T00:00:00Z", "2026-08-01T01:00:00Z"),
+                    ("2026-08-01T01:00:00Z", "2026-08-01T02:00:00Z"),
+                    ("2026-08-01T02:00:00Z", "2026-08-01T02:30:00Z"),
+                ],
+                [
+                    (partition["start"], partition["end"])
+                    for partition in state["partitions"]
+                ],
+            )
+
+    def test_paginated_fallback_failure_preserves_recovered_work(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(
+                arguments(run_dir, enable_targeted_fallback=True)
+            )
+            primary = controller.next_action(state)
+            assert primary is not None
+            controller.record_failure(state, primary, "query timed out")
+            fallback = controller.next_action(state)
+            assert fallback is not None
+            partition = state["partitions"][0]
+            partition["discoveryCursor"] = {
+                "completedAt": "2026-08-01T00:30:00Z",
+                "sessionId": "session-1",
+                "shutdownEventId": "event-1",
+            }
+            partition["sessions"] = [{"session_id": "session-1"}]
+            partition["batches"] = [
+                {
+                    "batchId": "batch-1",
+                    "sessionIds": ["session-1"],
+                    "status": "complete",
+                }
+            ]
+
+            controller.record_failure(state, fallback, "query timed out")
+
+            self.assertEqual(56, len(state["partitions"]))
+            self.assertEqual("omitted", partition["status"])
+            self.assertEqual(
+                [{"session_id": "session-1"}],
+                partition["sessions"],
+            )
+            self.assertEqual("batch-1", partition["batches"][0]["batchId"])
+
     def test_discovery_overflow_splits_without_accepting_rows(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(

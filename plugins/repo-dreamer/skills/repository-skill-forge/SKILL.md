@@ -138,9 +138,12 @@ in primary discovery immediately replaces the failed range with three-hour
 partitions that use the ordered `session.shutdown` inventory strategy. The
 `events` table has no repository column, so fallback uses the mandatory
 tool-level repository scope rather than an invalid SQL predicate. A failed
-three-hour fallback partition is divided once into three one-hour partitions.
-Each failed one-hour action is immediately omitted when partial extraction is
-allowed. The fallback is paginated, but no failed action is retried unchanged.
+untouched three-hour fallback partition is divided once into one-hour
+partitions. A shorter edge partition uses one-hour windows plus its final
+remainder. Partitions with successful earlier pages retain their recovered
+sessions and are not split. Each failed one-hour action is immediately omitted
+when partial extraction is allowed. The fallback is paginated, but no failed
+action is retried unchanged.
 With fallback disabled, primary timeout and overflow partitions retain adaptive
 time splitting down to `minWindowMinutes`. Syntax, schema, validation,
 authorization, and genuinely unknown failures are not retryable. Discovery has
@@ -181,9 +184,9 @@ When `enableTargetedFallback=true`:
 1. a primary discovery range that fails from timeout, network, rate-limit, or
    server error switches directly to bounded three-hour, cursor-paginated
    `session.shutdown` inventory;
-2. a failed three-hour shutdown-inventory partition is split into three
-   one-hour partitions, and a failed one-hour partition is omitted in partial
-   mode;
+2. a failed untouched three-hour shutdown-inventory partition is split into
+   one-hour partitions, while a later paginated failure preserves prior pages;
+   a failed one-hour partition is omitted in partial mode;
 3. a timed-out exact-session tool unit immediately switches from
    `tool_requests` to bounded `tool.execution_start` and
    `tool.execution_complete` events; a failed event fallback is omitted;

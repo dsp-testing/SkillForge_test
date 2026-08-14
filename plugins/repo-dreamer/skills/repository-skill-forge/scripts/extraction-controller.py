@@ -763,21 +763,24 @@ def split_shutdown_fallback_partition(
     partition: dict[str, Any],
     reason: str,
 ) -> bool:
-    if partition.get("fallbackSplitDepth") != 0:
+    if (
+        partition.get("fallbackSplitDepth") != 0
+        or partition.get("discoveryCursor")
+        or partition["sessions"]
+        or partition["batches"]
+    ):
         return False
     start = parse_timestamp(partition["start"])
     end = parse_timestamp(partition["end"])
-    step = (end - start) / 3
-    boundaries = [start, start + step, start + step * 2, end]
-    children = [
-        make_partition(
-            timestamp_text(boundaries[index]),
-            timestamp_text(boundaries[index + 1]),
-            discovery_strategy="shutdown_events",
-            fallback_split_depth=1,
-        )
-        for index in range(3)
-    ]
+    if end - start <= timedelta(hours=1):
+        return False
+    children = make_fixed_partitions(
+        partition["start"],
+        partition["end"],
+        duration=timedelta(hours=1),
+        discovery_strategy="shutdown_events",
+        fallback_split_depth=1,
+    )
     index = state["partitions"].index(partition)
     state["partitions"][index : index + 1] = children
     state["retryHistory"].append(
