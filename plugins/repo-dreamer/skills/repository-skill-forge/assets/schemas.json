@@ -259,6 +259,22 @@
           "type": "array",
           "items": { "$ref": "#/$defs/compactObservation" }
         },
+        "fingerprintCatalog": {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": { "pattern": "^[0-9a-f]{16}$" },
+          "additionalProperties": {
+            "type": "object",
+            "required": ["kind", "signatureVersion", "signature", "lastSeenAt"],
+            "properties": {
+              "kind": { "enum": ["command", "script"] },
+              "signatureVersion": { "const": 1 },
+              "signature": { "type": "object", "minProperties": 1 },
+              "lastSeenAt": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        },
         "proposalQueue": {
           "type": "array",
           "items": { "$ref": "#/$defs/proposalQueueEntry" }

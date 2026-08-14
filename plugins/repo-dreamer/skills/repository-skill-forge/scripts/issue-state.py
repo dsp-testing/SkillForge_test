@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from forge_common import parse_timestamp, read_json, write_json
+from forge_common import parse_timestamp, read_json, stable_hash, write_json
 
 MARKER = "repository-skill-forge-state"
 BLOCK_RE = re.compile(
@@ -45,9 +45,11 @@ ALLOWED_TOP_LEVEL = {
     "cursor",
     "updatedAt",
     "observations",
+    "fingerprintCatalog",
     "proposalQueue",
     "proposalHistory",
 }
+LEGACY_TOP_LEVEL = ALLOWED_TOP_LEVEL - {"fingerprintCatalog"}
 OBSERVATION_KEYS = {
     "evidenceKey",
     "fingerprint",
@@ -111,8 +113,16 @@ FORBIDDEN_KEY_RE = re.compile(
 FORBIDDEN_VALUE_RE = re.compile(
     r"(?:/(?:Users|home)/[^/\s]+|[A-Za-z]:\\Users\\|"
     r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b|"
-    r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)"
+    r"\bAKIA[0-9A-Z]{16}\b|"
+    r"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}|"
+    r"\b(?:password|passwd|token|secret|api[_-]?key)\s*[:=]\s*"
+    r"['\"]?(?!<|\$\{|\$[A-Z_]+)[^\s'\"]{12,}|"
+    r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)",
+    re.IGNORECASE,
 )
+MAX_FINGERPRINT_CATALOG_ENTRIES = 64
+MAX_FINGERPRINT_CATALOG_BYTES = 12_000
+MAX_SIGNATURE_BYTES = 2_000
 
 
 def validate_timestamp(value: Any, field: str) -> None:
@@ -194,6 +204,90 @@ def validate_observations(observations: list[Any]) -> None:
                 or not ref["value"]
             ):
                 raise ValueError("issue state observation contains an invalid ref")
+
+
+def validate_fingerprint_catalog(catalog: Any) -> None:
+    if not isinstance(catalog, dict):
+        raise ValueError("issue state fingerprintCatalog must be an object")
+    if len(catalog) > MAX_FINGERPRINT_CATALOG_ENTRIES:
+        raise ValueError("issue state fingerprintCatalog exceeds its entry limit")
+    serialized_bytes = len(
+        json.dumps(catalog, sort_keys=True, separators=(",", ":")).encode()
+    )
+    if serialized_bytes > MAX_FINGERPRINT_CATALOG_BYTES:
+        raise ValueError("issue state fingerprintCatalog exceeds its size limit")
+    for fingerprint, entry in catalog.items():
+        if not isinstance(fingerprint, str) or not re.fullmatch(
+            r"[0-9a-f]{16}", fingerprint
+        ):
+            raise ValueError("issue state fingerprintCatalog contains an invalid key")
+        if not isinstance(entry, dict) or set(entry) != {
+            "kind",
+            "signatureVersion",
+            "signature",
+            "lastSeenAt",
+        }:
+            raise ValueError(
+                "issue state fingerprintCatalog contains an unsupported entry"
+            )
+        kind = entry.get("kind")
+        signature = entry.get("signature")
+        if kind not in {"command", "script"}:
+            raise ValueError("issue state fingerprintCatalog contains an invalid kind")
+        if (
+            isinstance(entry.get("signatureVersion"), bool)
+            or entry.get("signatureVersion") != 1
+        ):
+            raise ValueError(
+                "issue state fingerprintCatalog contains an unsupported signature version"
+            )
+        if not isinstance(signature, dict) or not signature:
+            raise ValueError(
+                "issue state fingerprintCatalog requires a nonempty signature"
+            )
+        signature_bytes = len(
+            json.dumps(signature, sort_keys=True, separators=(",", ":")).encode()
+        )
+        if signature_bytes > MAX_SIGNATURE_BYTES:
+            raise ValueError("issue state fingerprintCatalog signature is too large")
+        if kind == "command":
+            if set(signature) != {"tokens"}:
+                raise ValueError(
+                    "issue state command fingerprint requires a token signature"
+                )
+            tokens = signature.get("tokens")
+            if (
+                not isinstance(tokens, list)
+                or not tokens
+                or len(tokens) > 40
+                or any(not isinstance(token, str) or len(token) > 80 for token in tokens)
+            ):
+                raise ValueError(
+                    "issue state command fingerprint has invalid tokens"
+                )
+        else:
+            if set(signature) != {"imports", "calls", "fileExtensions"}:
+                raise ValueError(
+                    "issue state script fingerprint has an invalid signature"
+                )
+            for key in ("imports", "calls", "fileExtensions"):
+                values = signature.get(key)
+                if (
+                    not isinstance(values, list)
+                    or len(values) > 64
+                    or any(
+                        not isinstance(value, str) or not value or len(value) > 200
+                        for value in values
+                    )
+                ):
+                    raise ValueError(
+                        f"issue state script fingerprint has invalid {key}"
+                    )
+        if stable_hash({"kind": kind, "signature": signature}) != fingerprint:
+            raise ValueError(
+                "issue state fingerprintCatalog signature does not match its key"
+            )
+        validate_timestamp(entry.get("lastSeenAt"), "fingerprint lastSeenAt")
 
 
 def validate_reconciliation(value: Any) -> None:
@@ -335,8 +429,13 @@ def validate_sanitized_value(value: Any, key: str | None = None) -> None:
 def validate_state(state: Any, repository: str) -> dict[str, Any]:
     if not isinstance(state, dict):
         raise ValueError("issue state must be a JSON object")
-    if set(state) != ALLOWED_TOP_LEVEL:
+    if frozenset(state) not in {
+        frozenset(ALLOWED_TOP_LEVEL),
+        frozenset(LEGACY_TOP_LEVEL),
+    }:
         raise ValueError("issue state has an unsupported top-level shape")
+    state = dict(state)
+    state.setdefault("fingerprintCatalog", {})
     if state.get("schemaVersion") != 2:
         raise ValueError("unsupported issue state schema version")
     if not isinstance(state.get("stateVersion"), int) or state["stateVersion"] < 1:
@@ -354,6 +453,7 @@ def validate_state(state: Any, repository: str) -> dict[str, Any]:
     if not isinstance(state.get("proposalHistory"), dict):
         raise ValueError("issue state proposalHistory must be an object")
     validate_observations(state["observations"])
+    validate_fingerprint_catalog(state["fingerprintCatalog"])
     validate_proposal_queue(state["proposalQueue"])
     validate_proposal_history(state["proposalHistory"])
     validate_sanitized_value(state)

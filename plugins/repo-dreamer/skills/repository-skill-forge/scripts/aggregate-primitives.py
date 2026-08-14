@@ -6,12 +6,18 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from collections import defaultdict
 from datetime import timedelta
 from typing import Any
 
 from forge_common import parse_timestamp, read_json, stable_hash, timestamp_text, write_json
+
+SIGNATURE_VERSION = 1
+MAX_FINGERPRINT_CATALOG_ENTRIES = 64
+MAX_FINGERPRINT_CATALOG_BYTES = 12_000
+MAX_SIGNATURE_BYTES = 2_000
 
 
 def reference_values(primitive: dict[str, Any], ref_type: str) -> set[str]:
@@ -34,10 +40,26 @@ def merge_evidence(
     if isinstance(previous_scope, dict) and previous_scope.get("repository") != repository:
         raise ValueError("state repository does not match the current repository")
     evidence_by_key: dict[str, dict[str, Any]] = {}
+    fingerprint_catalog = (
+        state.get("fingerprintCatalog", {})
+        if isinstance(state, dict)
+        else {}
+    )
+    fingerprint_catalog = (
+        fingerprint_catalog if isinstance(fingerprint_catalog, dict) else {}
+    )
     if isinstance(state, dict):
         for item in state.get("observations", state.get("evidenceLedger", [])):
             if isinstance(item, dict) and item.get("evidenceKey"):
-                evidence_by_key[str(item["evidenceKey"])] = item
+                restored = dict(item)
+                catalog_entry = fingerprint_catalog.get(str(item.get("fingerprint")))
+                if (
+                    isinstance(catalog_entry, dict)
+                    and catalog_entry.get("kind") == item.get("kind")
+                    and isinstance(catalog_entry.get("signature"), dict)
+                ):
+                    restored["signature"] = catalog_entry["signature"]
+                evidence_by_key[str(item["evidenceKey"])] = restored
     for item in document.get("primitives", []):
         if isinstance(item, dict) and item.get("evidenceKey"):
             evidence_by_key[str(item["evidenceKey"])] = compact_observation(
@@ -49,6 +71,61 @@ def merge_evidence(
             }
     history = state.get("proposalHistory", {}) if isinstance(state, dict) else {}
     return list(evidence_by_key.values()), history if isinstance(history, dict) else {}
+
+
+def build_fingerprint_catalog(
+    evidence: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    entries: dict[str, dict[str, Any]] = {}
+    for item in evidence:
+        fingerprint = item.get("fingerprint")
+        kind = item.get("kind")
+        signature = item.get("signature")
+        completed_at = item.get("completedAt")
+        if (
+            not isinstance(fingerprint, str)
+            or kind not in {"command", "script"}
+            or not isinstance(signature, dict)
+            or not signature
+            or not isinstance(completed_at, str)
+            or stable_hash({"kind": kind, "signature": signature}) != fingerprint
+        ):
+            continue
+        signature_bytes = len(
+            json.dumps(signature, sort_keys=True, separators=(",", ":")).encode()
+        )
+        if signature_bytes > MAX_SIGNATURE_BYTES:
+            continue
+        current = entries.get(fingerprint)
+        if current is None or completed_at > current["lastSeenAt"]:
+            entries[fingerprint] = {
+                "kind": kind,
+                "signatureVersion": SIGNATURE_VERSION,
+                "signature": signature,
+                "lastSeenAt": completed_at,
+            }
+
+    retained: dict[str, dict[str, Any]] = {}
+    retained_bytes = 2
+    ordered = sorted(
+        entries.items(),
+        key=lambda item: (-parse_timestamp(item[1]["lastSeenAt"]).timestamp(), item[0]),
+    )
+    for fingerprint, entry in ordered:
+        if len(retained) >= MAX_FINGERPRINT_CATALOG_ENTRIES:
+            break
+        entry_bytes = len(
+            json.dumps(
+                {fingerprint: entry},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        )
+        if retained_bytes + entry_bytes > MAX_FINGERPRINT_CATALOG_BYTES:
+            continue
+        retained[fingerprint] = entry
+        retained_bytes += entry_bytes
+    return dict(sorted(retained.items()))
 
 
 def compact_observation(item: dict[str, Any], repository: str) -> dict[str, Any]:
@@ -347,6 +424,7 @@ def main() -> None:
             retained_observations,
             key=lambda item: str(item.get("evidenceKey")),
         ),
+        "fingerprintCatalog": build_fingerprint_catalog(retained_evidence),
         "proposalQueue": proposal_queue if isinstance(proposal_queue, list) else [],
         "proposalHistory": proposal_history,
     }
