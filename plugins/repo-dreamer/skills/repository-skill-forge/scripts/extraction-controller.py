@@ -34,8 +34,9 @@ def make_partition(
     end: str,
     *,
     discovery_strategy: str = "sessions",
+    fallback_split_depth: int | None = None,
 ) -> dict[str, Any]:
-    return {
+    partition = {
         "partitionId": partition_id(start, end),
         "start": start,
         "end": end,
@@ -46,24 +47,30 @@ def make_partition(
         "sessions": [],
         "batches": [],
     }
+    if fallback_split_depth is not None:
+        partition["fallbackSplitDepth"] = fallback_split_depth
+    return partition
 
 
-def make_daily_partitions(
+def make_fixed_partitions(
     start: str,
     end: str,
     *,
+    duration: timedelta,
     discovery_strategy: str,
+    fallback_split_depth: int | None = None,
 ) -> list[dict[str, Any]]:
     current = parse_timestamp(start)
     finish = parse_timestamp(end)
     partitions = []
     while current < finish:
-        partition_end = min(current + timedelta(days=1), finish)
+        partition_end = min(current + duration, finish)
         partitions.append(
             make_partition(
                 timestamp_text(current),
                 timestamp_text(partition_end),
                 discovery_strategy=discovery_strategy,
+                fallback_split_depth=fallback_split_depth,
             )
         )
         current = partition_end
@@ -751,6 +758,41 @@ def split_partition(state: dict[str, Any], partition: dict[str, Any], reason: st
     return True
 
 
+def split_shutdown_fallback_partition(
+    state: dict[str, Any],
+    partition: dict[str, Any],
+    reason: str,
+) -> bool:
+    if (
+        partition.get("fallbackSplitDepth") != 0
+        or partition.get("discoveryCursor")
+        or partition["sessions"]
+        or partition["batches"]
+    ):
+        return False
+    start = parse_timestamp(partition["start"])
+    end = parse_timestamp(partition["end"])
+    if end - start <= timedelta(hours=1):
+        return False
+    children = make_fixed_partitions(
+        partition["start"],
+        partition["end"],
+        duration=timedelta(hours=1),
+        discovery_strategy="shutdown_events",
+        fallback_split_depth=1,
+    )
+    index = state["partitions"].index(partition)
+    state["partitions"][index : index + 1] = children
+    state["retryHistory"].append(
+        {
+            "kind": "split_shutdown_fallback",
+            "partitionId": partition["partitionId"],
+            "reason": reason,
+        }
+    )
+    return True
+
+
 def switch_to_shutdown_fallback(
     state: dict[str, Any],
     partition: dict[str, Any],
@@ -758,10 +800,12 @@ def switch_to_shutdown_fallback(
 ) -> bool:
     if partition.get("discoveryStrategy", "sessions") != "sessions":
         return False
-    replacements = make_daily_partitions(
+    replacements = make_fixed_partitions(
         partition["start"],
         partition["end"],
+        duration=timedelta(hours=3),
         discovery_strategy="shutdown_events",
+        fallback_split_depth=0,
     )
     index = state["partitions"].index(partition)
     state["partitions"][index : index + 1] = replacements
@@ -1018,7 +1062,7 @@ def record_failure(
     recovered = False
     if action["kind"] == "discovery":
         recovered = (
-            False
+            split_shutdown_fallback_partition(state, partition, reason)
             if action.get("strategy") == "shutdown_events"
             else split_partition(state, partition, reason)
         )

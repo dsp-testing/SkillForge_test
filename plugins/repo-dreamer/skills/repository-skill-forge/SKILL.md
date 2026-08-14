@@ -134,16 +134,20 @@ sessions that move between time partitions while discovery is running.
 Retry only non-timeout transient network, rate-limit, or server failures, at
 most once. No timeout repeats the identical action. With
 `enableTargetedFallback=true`, a timeout, network, rate-limit, or server failure
-in primary discovery immediately replaces the failed range with UTC-day
+in primary discovery immediately replaces the failed range with three-hour
 partitions that use the ordered `session.shutdown` inventory strategy. The
 `events` table has no repository column, so fallback uses the mandatory
-tool-level repository scope rather than an invalid SQL predicate. The fallback
-is paginated but each failed fallback action is attempted only once. A failed
-fallback day is immediately omitted when partial extraction is allowed. With
-fallback disabled, primary timeout and overflow partitions retain adaptive time
-splitting down to `minWindowMinutes`. Syntax, schema, validation, authorization,
-and genuinely unknown failures are not retryable. Discovery has no global
-failure-count or elapsed-time budget. With `--fail-on-omission`, any
+tool-level repository scope rather than an invalid SQL predicate. A failed
+untouched three-hour fallback partition is divided once into one-hour
+partitions. A shorter edge partition uses one-hour windows plus its final
+remainder. Partitions with successful earlier pages retain their recovered
+sessions and are not split. Each failed one-hour action is immediately omitted
+when partial extraction is allowed. The fallback is paginated, but no failed
+action is retried unchanged.
+With fallback disabled, primary timeout and overflow partitions retain adaptive
+time splitting down to `minWindowMinutes`. Syntax, schema, validation,
+authorization, and genuinely unknown failures are not retryable. Discovery has
+no global failure-count or elapsed-time budget. With `--fail-on-omission`, any
 irreducible discovery failure blocks.
 
 Every query success or failure must be recorded through
@@ -178,9 +182,11 @@ page-size reduction when partial mode is enabled.
 When `enableTargetedFallback=true`:
 
 1. a primary discovery range that fails from timeout, network, rate-limit, or
-   server error switches to bounded daily, cursor-paginated
+   server error switches directly to bounded three-hour, cursor-paginated
    `session.shutdown` inventory;
-2. a failed shutdown-inventory day is omitted immediately in partial mode;
+2. a failed untouched three-hour shutdown-inventory partition is split into
+   one-hour partitions, while a later paginated failure preserves prior pages;
+   a failed one-hour partition is omitted in partial mode;
 3. a timed-out exact-session tool unit immediately switches from
    `tool_requests` to bounded `tool.execution_start` and
    `tool.execution_complete` events; a failed event fallback is omitted;
