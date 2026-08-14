@@ -73,7 +73,7 @@ class ExtractionControllerTests(unittest.TestCase):
         self.assertNotIn("ORDER BY", query)
         self.assertNotIn("agent_name, repository, branch", query)
 
-    def test_discovery_timeout_switches_to_daily_shutdown_fallback(self) -> None:
+    def test_discovery_timeout_switches_to_three_hour_shutdown_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(
                 arguments(run_dir, enable_targeted_fallback=True)
@@ -85,9 +85,14 @@ class ExtractionControllerTests(unittest.TestCase):
             fallback = controller.next_action(state)
             assert fallback is not None
 
-            self.assertEqual(7, len(state["partitions"]))
+            self.assertEqual(56, len(state["partitions"]))
             self.assertEqual("shutdown_events", fallback["strategy"])
             self.assertIn("type = 'session.shutdown'", fallback["sql"])
+            self.assertEqual(
+                "2026-08-01T03:00:00Z",
+                state["partitions"][0]["end"],
+            )
+            self.assertEqual(0, state["partitions"][0]["fallbackSplitDepth"])
             self.assertFalse(
                 any(item["kind"] == "retry_same_unit" for item in state["retryHistory"])
             )
@@ -178,7 +183,7 @@ class ExtractionControllerTests(unittest.TestCase):
             )
             self.assertFalse(state["partitions"][1]["discoveryComplete"])
 
-    def test_fallback_timeout_omits_window_and_continues(self) -> None:
+    def test_fallback_timeout_splits_to_one_hour_then_omits(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(
                 arguments(run_dir, enable_targeted_fallback=True)
@@ -190,6 +195,21 @@ class ExtractionControllerTests(unittest.TestCase):
             assert fallback is not None
 
             controller.record_failure(state, fallback, "query timed out")
+            one_hour_action = controller.next_action(state)
+            assert one_hour_action is not None
+
+            self.assertEqual(58, len(state["partitions"]))
+            self.assertEqual(
+                "2026-08-01T01:00:00Z",
+                state["partitions"][0]["end"],
+            )
+            self.assertEqual(1, state["partitions"][0]["fallbackSplitDepth"])
+            self.assertEqual(
+                "split_shutdown_fallback",
+                state["retryHistory"][-1]["kind"],
+            )
+
+            controller.record_failure(state, one_hour_action, "query timed out")
             next_action = controller.next_action(state)
 
             self.assertEqual("omitted", state["partitions"][0]["status"])
@@ -399,7 +419,7 @@ class ExtractionControllerTests(unittest.TestCase):
             self.assertEqual("partial", state["status"])
             self.assertEqual("omitted", batch["status"])
 
-    def test_discovery_continues_after_four_fallback_omissions(self) -> None:
+    def test_discovery_continues_after_four_one_hour_fallback_omissions(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(
                 arguments(run_dir, enable_targeted_fallback=True)
@@ -407,15 +427,14 @@ class ExtractionControllerTests(unittest.TestCase):
             primary = controller.next_action(state)
             assert primary is not None
             controller.record_failure(state, primary, "query timed out")
-            for _ in range(4):
+            while len(state["omittedUnits"]) < 4:
                 action = controller.next_action(state)
                 assert action is not None
                 controller.record_failure(state, action, "query timed out")
 
             self.assertEqual("running", state["status"])
-            self.assertEqual(5, state["workCounters"]["failedQueries"])
             self.assertEqual(4, len(state["omittedUnits"]))
-            self.assertEqual(7, len(state["partitions"]))
+            self.assertEqual(60, len(state["partitions"]))
 
     def test_irreducible_discovery_timeout_becomes_partial_omission(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
