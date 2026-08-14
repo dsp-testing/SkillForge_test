@@ -71,6 +71,7 @@ repository-skill-forge-state:v2:begin
     "cursor": null,
     "updatedAt": "<windowEnd>",
     "observations": [],
+    "fingerprintCatalog": {},
     "proposalQueue": [],
     "proposalHistory": {}
 }
@@ -216,7 +217,11 @@ evidence into candidate generation.
 Raw commands and source content remain ephemeral. Persistent observations keep
 only evidence/fingerprint hashes, repository-salted session and branch hashes,
 timestamps, outcome, surface, kind, bounded path families, and repository
-references.
+references. Durable state also keeps a bounded catalog of versioned, sanitized
+structural signatures keyed by fingerprint. This allows later runs to explain
+and aggregate historical patterns without retaining raw commands or source
+content. Legacy v2 states without `fingerprintCatalog` migrate as an empty
+catalog on their next parse and render.
 
 ### 6. Build compact state and candidates
 
