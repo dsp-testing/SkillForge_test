@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 from collections import defaultdict
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 from forge_common import parse_timestamp, read_json, stable_hash, timestamp_text, write_json
@@ -18,6 +20,22 @@ SIGNATURE_VERSION = 1
 MAX_FINGERPRINT_CATALOG_ENTRIES = 64
 MAX_FINGERPRINT_CATALOG_BYTES = 12_000
 MAX_SIGNATURE_BYTES = 2_000
+
+
+def validate_next_state(
+    state: dict[str, Any],
+    repository: str,
+) -> dict[str, Any]:
+    validator_path = Path(__file__).with_name("issue-state.py")
+    spec = importlib.util.spec_from_file_location(
+        "repository_skill_forge_issue_state",
+        validator_path,
+    )
+    if spec is None or spec.loader is None:
+        raise ValueError("unable to load issue state validator")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.validate_state(state, repository)
 
 
 def reference_values(primitive: dict[str, Any], ref_type: str) -> set[str]:
@@ -56,7 +74,15 @@ def merge_evidence(
                 if (
                     isinstance(catalog_entry, dict)
                     and catalog_entry.get("kind") == item.get("kind")
+                    and catalog_entry.get("signatureVersion") == SIGNATURE_VERSION
                     and isinstance(catalog_entry.get("signature"), dict)
+                    and stable_hash(
+                        {
+                            "kind": item.get("kind"),
+                            "signature": catalog_entry["signature"],
+                        }
+                    )
+                    == item.get("fingerprint")
                 ):
                     restored["signature"] = catalog_entry["signature"]
                 evidence_by_key[str(item["evidenceKey"])] = restored
@@ -97,7 +123,9 @@ def build_fingerprint_catalog(
         if signature_bytes > MAX_SIGNATURE_BYTES:
             continue
         current = entries.get(fingerprint)
-        if current is None or completed_at > current["lastSeenAt"]:
+        if current is None or parse_timestamp(completed_at) > parse_timestamp(
+            current["lastSeenAt"]
+        ):
             entries[fingerprint] = {
                 "kind": kind,
                 "signatureVersion": SIGNATURE_VERSION,
@@ -428,8 +456,9 @@ def main() -> None:
         "proposalQueue": proposal_queue if isinstance(proposal_queue, list) else [],
         "proposalHistory": proposal_history,
     }
+    validated_state = validate_next_state(next_state, args.repository)
     write_json(args.output, result)
-    write_json(args.state_out, next_state)
+    write_json(args.state_out, validated_state)
 
 
 if __name__ == "__main__":

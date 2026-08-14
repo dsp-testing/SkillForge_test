@@ -108,6 +108,46 @@ class FingerprintCatalogTests(unittest.TestCase):
 
         self.assertEqual(signature, patterns[0]["signature"])
 
+    def test_catalog_does_not_restore_inconsistent_signature(self) -> None:
+        signature = {"tokens": ["git", "show", "<sha>"]}
+        fingerprint = stable_hash({"kind": "command", "signature": signature})
+        state = empty_state() | {
+            "observations": [observation(fingerprint)],
+            "fingerprintCatalog": {
+                fingerprint: {
+                    "kind": "command",
+                    "signatureVersion": 2,
+                    "signature": {"tokens": ["git", "status"]},
+                    "lastSeenAt": "2026-08-13T00:00:00Z",
+                }
+            },
+        }
+
+        evidence, _history = aggregate.merge_evidence(
+            state,
+            {"primitives": []},
+            "owner/repository",
+        )
+
+        self.assertNotIn("signature", evidence[0])
+
+    def test_catalog_rejects_empty_command_token(self) -> None:
+        signature = {"tokens": ["git", ""]}
+        fingerprint = stable_hash({"kind": "command", "signature": signature})
+        state = empty_state() | {
+            "fingerprintCatalog": {
+                fingerprint: {
+                    "kind": "command",
+                    "signatureVersion": 1,
+                    "signature": signature,
+                    "lastSeenAt": "2026-08-13T00:00:00Z",
+                }
+            }
+        }
+
+        with self.assertRaisesRegex(ValueError, "invalid tokens"):
+            issue_state.validate_state(state, "owner/repository")
+
     def test_catalog_rejects_secret_shaped_signature_values(self) -> None:
         signature = {"tokens": ["deploy", "token=abcdefghijklmnop"]}
         fingerprint = stable_hash({"kind": "command", "signature": signature})
@@ -166,6 +206,48 @@ class FingerprintCatalogTests(unittest.TestCase):
             len(json.dumps(catalog, separators=(",", ":")).encode()),
             aggregate.MAX_FINGERPRINT_CATALOG_BYTES,
         )
+
+    def test_catalog_builder_compares_parsed_timestamps(self) -> None:
+        signature = {"tokens": ["git", "status"]}
+        fingerprint = stable_hash({"kind": "command", "signature": signature})
+        catalog = aggregate.build_fingerprint_catalog(
+            [
+                {
+                    "fingerprint": fingerprint,
+                    "kind": "command",
+                    "signature": signature,
+                    "completedAt": "2026-08-13T10:00:00+02:00",
+                },
+                {
+                    "fingerprint": fingerprint,
+                    "kind": "command",
+                    "signature": signature,
+                    "completedAt": "2026-08-13T09:00:00Z",
+                },
+            ]
+        )
+
+        self.assertEqual(
+            "2026-08-13T09:00:00Z",
+            catalog[fingerprint]["lastSeenAt"],
+        )
+
+    def test_next_state_is_validated_before_persistence(self) -> None:
+        signature = {"tokens": ["deploy", "token=abcdefghijklmnop"]}
+        fingerprint = stable_hash({"kind": "command", "signature": signature})
+        state = empty_state() | {
+            "fingerprintCatalog": {
+                fingerprint: {
+                    "kind": "command",
+                    "signatureVersion": 1,
+                    "signature": signature,
+                    "lastSeenAt": "2026-08-13T00:00:00Z",
+                }
+            }
+        }
+
+        with self.assertRaisesRegex(ValueError, "secret-shaped"):
+            aggregate.validate_next_state(state, "owner/repository")
 
 
 if __name__ == "__main__":

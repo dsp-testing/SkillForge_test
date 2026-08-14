@@ -260,7 +260,10 @@ def validate_fingerprint_catalog(catalog: Any) -> None:
                 not isinstance(tokens, list)
                 or not tokens
                 or len(tokens) > 40
-                or any(not isinstance(token, str) or len(token) > 80 for token in tokens)
+                or any(
+                    not isinstance(token, str) or not token or len(token) > 80
+                    for token in tokens
+                )
             ):
                 raise ValueError(
                     "issue state command fingerprint has invalid tokens"
