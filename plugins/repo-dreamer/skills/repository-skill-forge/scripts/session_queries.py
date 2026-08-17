@@ -34,7 +34,17 @@ def build_discovery_query(
 ) -> str:
     agents = ",\n          ".join(f"'{agent}'" for agent in SUPPORTED_AGENTS)
     after = ""
-    if cursor:
+    if cursor is not None:
+        if (
+            not isinstance(cursor, dict)
+            or not isinstance(cursor.get("updatedAt"), str)
+            or not cursor["updatedAt"]
+            or not isinstance(cursor.get("sessionId"), str)
+            or not cursor["sessionId"]
+        ):
+            raise ValueError(
+                "discovery cursor requires non-empty updatedAt and sessionId"
+            )
         after = (
             "\n  AND (updated_at > "
             f"TIMESTAMP '{sql_literal(cursor['updatedAt'])}'"

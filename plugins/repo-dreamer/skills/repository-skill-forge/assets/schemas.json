@@ -90,6 +90,15 @@
               "batchId": { "type": "string" },
               "windowStart": { "type": "string" },
               "windowEnd": { "type": "string" },
+              "cursor": {
+                "type": ["object", "null"],
+                "required": ["updatedAt", "sessionId"],
+                "properties": {
+                  "updatedAt": { "type": "string" },
+                  "sessionId": { "type": "string" }
+                },
+                "additionalProperties": false
+              },
               "sessionHashes": {
                 "type": "array",
                 "minItems": 1,

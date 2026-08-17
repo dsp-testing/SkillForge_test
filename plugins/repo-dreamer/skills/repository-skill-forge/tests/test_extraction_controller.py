@@ -79,6 +79,19 @@ class ExtractionControllerTests(unittest.TestCase):
         self.assertIn("id > 'session-100'", query)
         self.assertNotIn("agent_name, repository, branch", query)
 
+    def test_discovery_rejects_malformed_cursor(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "discovery cursor requires non-empty updatedAt and sessionId",
+        ):
+            build_discovery_query(
+                repository="owner/repository",
+                start="2026-08-01T00:00:00Z",
+                end="2026-08-08T00:00:00Z",
+                limit=100,
+                cursor={"updatedAt": "2026-08-04T12:00:00Z"},
+            )
+
     def test_discovery_timeout_splits_materialized_session_window(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(arguments(run_dir))
@@ -518,7 +531,7 @@ class ExtractionControllerTests(unittest.TestCase):
                 any(item["kind"] == "split_time" for item in state["retryHistory"])
             )
 
-    def test_irreducible_transient_discovery_error_blocks_without_batch_lookup(self) -> None:
+    def test_irreducible_transient_discovery_error_becomes_partial_omission(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(
                 arguments(
@@ -544,8 +557,11 @@ class ExtractionControllerTests(unittest.TestCase):
                 error_kind="server",
             )
 
-            self.assertEqual("blocked", state["status"])
-            self.assertEqual("server error 503", state["blockers"][-1]["reason"])
+            controller.next_action(state)
+
+            self.assertEqual("partial", state["status"])
+            self.assertFalse(state["blockers"])
+            self.assertEqual("server error 503", state["omittedUnits"][-1]["reason"])
 
     def test_action_id_can_replace_missing_action_file(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:

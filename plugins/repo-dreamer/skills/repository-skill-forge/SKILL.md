@@ -200,9 +200,10 @@ When `enableToolEventFallback=true`:
 Fallback applies only to the failed tool extraction unit and does not query
 outside the selected evidence window.
 
-With default `allowPartial=true`, irreducible discovery windows are recorded by
-time range, and irreducible post-discovery units are recorded with
-repository-salted session hashes. Use `--fail-on-omission` for fail-closed
+With default `allowPartial=true`, irreducible timeout or exhausted transient
+discovery windows are recorded by time range, and irreducible post-discovery
+units are recorded with repository-salted session hashes. Use
+`--fail-on-omission` for fail-closed
 behavior. A disclosed partial run is successful and advances durable state after
 validation, reconciliation, and the publication or no-publication decision.
 

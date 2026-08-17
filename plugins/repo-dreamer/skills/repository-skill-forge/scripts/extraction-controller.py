@@ -828,7 +828,7 @@ def record_failure(
     if (
         state["limits"]["allowPartial"]
         and action["kind"] == "discovery"
-        and resolved_error_kind == "timeout"
+        and resolved_error_kind in transient_error_kinds
     ):
         omit_discovery_partition(state, action, partition, reason)
         return
