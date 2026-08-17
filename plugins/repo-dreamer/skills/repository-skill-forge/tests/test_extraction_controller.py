@@ -214,6 +214,165 @@ class ExtractionControllerTests(unittest.TestCase):
             self.assertEqual(1, len(actions))
             self.assertEqual("discovery", actions[0]["kind"])
 
+    def test_parallel_actions_remain_valid_until_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(
+                arguments(
+                    run_dir,
+                    discovery_page_size=10,
+                    session_batch_size=2,
+                )
+            )
+            discovery = controller.next_action(state)
+            assert discovery is not None
+            write_rows(
+                discovery["outputPath"],
+                [
+                    {
+                        "session_id": f"session-{index}",
+                        "updated_at": f"2026-08-07T12:0{index}:00Z",
+                    }
+                    for index in range(6)
+                ],
+            )
+            controller.record_success(state, discovery, discovery["outputPath"])
+            actions = controller.next_actions(state, 3)
+            first, second, third = actions
+            write_rows(
+                first["outputPath"],
+                [
+                    {
+                        "session_id": session_id,
+                        "agent_name": "Copilot CLI",
+                        "repository": "owner/repository",
+                        "branch": "main",
+                        "created_at": "2026-08-07T10:00:00Z",
+                        "updated_at": "2026-08-07T12:00:00Z",
+                    }
+                    for session_id in state["partitions"][0]["batches"][0]["sessionIds"]
+                ],
+            )
+
+            controller.record_success(state, first, first["outputPath"])
+
+            self.assertEqual(second, controller.load_action(second["actionId"], state))
+            self.assertEqual(
+                [second["actionId"], third["actionId"], f"refs-{first['batchId']}-0-p500-r0"],
+                [
+                    action["actionId"]
+                    for action in controller.next_actions(state, 3)
+                ],
+            )
+
+    def test_tool_timeout_splits_only_tools_and_reuses_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(
+                arguments(
+                    run_dir,
+                    discovery_page_size=10,
+                    session_batch_size=4,
+                    enable_tool_event_fallback=True,
+                )
+            )
+            discovery = controller.next_action(state)
+            assert discovery is not None
+            write_rows(
+                discovery["outputPath"],
+                [
+                    {
+                        "session_id": f"session-{index}",
+                        "updated_at": f"2026-08-07T12:0{index}:00Z",
+                    }
+                    for index in range(4)
+                ],
+            )
+            controller.record_success(state, discovery, discovery["outputPath"])
+            metadata = controller.next_action(state)
+            assert metadata is not None
+            write_rows(
+                metadata["outputPath"],
+                [
+                    {
+                        "session_id": f"session-{index}",
+                        "agent_name": "Copilot CLI",
+                        "repository": "owner/repository",
+                        "branch": "main",
+                        "created_at": f"2026-08-07T0{index}:00:00Z",
+                        "updated_at": f"2026-08-07T12:0{index}:00Z",
+                    }
+                    for index in range(4)
+                ],
+            )
+            controller.record_success(state, metadata, metadata["outputPath"])
+            batch = state["partitions"][0]["batches"][0]
+            refs_path = str(Path(run_dir) / "refs.json")
+            files_path = str(Path(run_dir) / "files.json")
+            write_rows(
+                refs_path,
+                [
+                    {
+                        "session_id": f"session-{index}",
+                        "ref_type": "pr",
+                        "ref_value": str(index),
+                        "turn_index": index,
+                    }
+                    for index in range(4)
+                ],
+            )
+            write_rows(
+                files_path,
+                [
+                    {
+                        "session_id": f"session-{index}",
+                        "file_path": f"src/{index}.py",
+                        "tool_name": "edit",
+                        "turn_index": index,
+                    }
+                    for index in range(4)
+                ],
+            )
+            batch["refsArtifacts"] = [refs_path]
+            batch["filesArtifacts"] = [files_path]
+            batch["status"] = "tools"
+            tools = controller.next_action(state)
+            assert tools is not None
+
+            controller.record_failure(state, tools, "query timed out")
+
+            children = state["partitions"][0]["batches"]
+            self.assertEqual(2, len(children))
+            self.assertTrue(all(child["status"] == "tools" for child in children))
+            self.assertTrue(
+                all(
+                    len(controller.read_json(child["metadataArtifact"])) == 2
+                    for child in children
+                )
+            )
+            self.assertTrue(
+                all(
+                    len(controller.read_json(child["refsArtifacts"][0])) == 2
+                    for child in children
+                )
+            )
+            self.assertTrue(
+                all(
+                    len(controller.read_json(child["filesArtifacts"][0])) == 2
+                    for child in children
+                )
+            )
+            self.assertTrue(
+                all(
+                    action["kind"] == "tool-calls"
+                    for action in controller.next_actions(state, 3)
+                )
+            )
+            self.assertFalse(
+                any(
+                    action["kind"] == "metadata"
+                    for action in controller.next_actions(state, 3)
+                )
+            )
+
     def test_transient_metadata_failure_recovers_on_single_retry(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(arguments(run_dir))
