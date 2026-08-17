@@ -67,6 +67,7 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
         args.max_rows,
         args.max_artifact_bytes,
         args.min_window_minutes,
+        args.max_concurrent_batches,
     ) < 1:
         raise ValueError("page, batch, row, artifact, and window limits must be positive")
     if args.max_query_retries < 0:
@@ -89,6 +90,7 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
             "maxRows": args.max_rows,
             "maxArtifactBytes": args.max_artifact_bytes,
             "minWindowMinutes": args.min_window_minutes,
+            "maxConcurrentBatches": args.max_concurrent_batches,
             "maxQueryRetries": args.max_query_retries,
             "allowPartial": args.allow_partial,
             "enableToolEventFallback": args.enable_tool_event_fallback,
@@ -199,25 +201,35 @@ def finalize_extraction(state: dict[str, Any]) -> None:
     state["status"] = "partial" if state["omittedUnits"] else "complete"
 
 
-def next_action(state: dict[str, Any]) -> dict[str, Any] | None:
+def next_actions(
+    state: dict[str, Any],
+    max_actions: int,
+) -> list[dict[str, Any]]:
     validate_state_invariants(state)
     if state.get("status") != "running":
-        return None
+        return []
+    if max_actions < 1:
+        raise ValueError("max actions must be positive")
     limits = state["limits"]
+    actions = []
     for partition in state["partitions"]:
         for batch in partition["batches"]:
             action = next_batch_action(state, partition, batch)
             if action is not None:
-                return action
+                actions.append(action)
+                if len(actions) == max_actions:
+                    return actions
         if partition["discoveryComplete"] and partition["status"] != "omitted":
             partition["status"] = "complete"
+    if actions:
+        return actions
     for partition in state["partitions"]:
         if not partition["discoveryComplete"]:
             action_id = (
                 f"discover-sessions-{partition['partitionId']}"
                 f"-{partition.get('discoveryPage', 0)}"
             )
-            return {
+            return [{
                 "actionId": action_id,
                 "kind": "discovery",
                 "partitionId": partition["partitionId"],
@@ -231,9 +243,14 @@ def next_action(state: dict[str, Any]) -> dict[str, Any] | None:
                     limit=limits["discoveryPageSize"],
                     cursor=partition.get("discoveryCursor"),
                 ),
-            }
+            }]
     finalize_extraction(state)
-    return None
+    return []
+
+
+def next_action(state: dict[str, Any]) -> dict[str, Any] | None:
+    actions = next_actions(state, 1)
+    return actions[0] if actions else None
 
 
 def next_batch_action(
@@ -894,9 +911,12 @@ def load_action(value: str, state: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(action, dict):
             raise ValueError("action must be a JSON object")
         return action
-    action = next_action(state)
-    if action is not None and action.get("actionId") == value:
-        return action
+    for action in next_actions(
+        state,
+        int(state["limits"].get("maxConcurrentBatches", 1)),
+    ):
+        if action.get("actionId") == value:
+            return action
     raise ValueError(f"action file or current action ID not found: {value}")
 
 
@@ -916,6 +936,7 @@ def main() -> None:
     init.add_argument("--max-rows", type=int, default=1000)
     init.add_argument("--max-artifact-bytes", type=int, default=10_000_000)
     init.add_argument("--min-window-minutes", type=int, default=15)
+    init.add_argument("--max-concurrent-batches", type=int, default=3)
     init.add_argument("--max-query-retries", type=int, default=1)
     init.add_argument("--enable-tool-event-fallback", action="store_true")
     partial_mode = init.add_mutually_exclusive_group()
@@ -926,6 +947,7 @@ def main() -> None:
     next_parser = subparsers.add_parser("next")
     next_parser.add_argument("--state", required=True)
     next_parser.add_argument("--out")
+    next_parser.add_argument("--parallel", action="store_true")
 
     success = subparsers.add_parser("record-success")
     success.add_argument("--state", required=True)
@@ -964,7 +986,12 @@ def main() -> None:
         if not isinstance(state, dict):
             raise ValueError("state must be a JSON object")
         if args.command == "next":
-            action = next_action(state)
+            max_actions = (
+                int(state["limits"]["maxConcurrentBatches"])
+                if args.parallel
+                else 1
+            )
+            actions = next_actions(state, max_actions)
             write_json(args.state, state)
             done = {"kind": "done", "status": state["status"]}
             if state["status"] == "blocked":
@@ -973,7 +1000,10 @@ def main() -> None:
                 done["coverage"] = state["coverage"]
             if state["status"] == "partial":
                 done["omittedUnits"] = state["omittedUnits"]
-            payload = action or done
+            if args.parallel and actions:
+                payload = {"kind": "action-batch", "actions": actions}
+            else:
+                payload = actions[0] if actions else done
             if args.out:
                 write_json(args.out, payload)
             else:

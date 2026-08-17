@@ -46,6 +46,7 @@ def arguments(run_dir: str, **overrides: object) -> argparse.Namespace:
         "max_rows": 1000,
         "max_artifact_bytes": 10_000_000,
         "min_window_minutes": 15,
+        "max_concurrent_batches": 3,
         "max_query_retries": 1,
         "allow_partial": True,
         "enable_tool_event_fallback": False,
@@ -161,6 +162,44 @@ class ExtractionControllerTests(unittest.TestCase):
                 },
                 state["partitions"][0]["discoveryCursor"],
             )
+
+    def test_parallel_scheduler_returns_three_independent_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(
+                arguments(
+                    run_dir,
+                    discovery_page_size=10,
+                    session_batch_size=2,
+                )
+            )
+            discovery = controller.next_action(state)
+            assert discovery is not None
+            write_rows(
+                discovery["outputPath"],
+                [
+                    {
+                        "session_id": f"session-{index}",
+                        "updated_at": f"2026-08-07T12:0{index}:00Z",
+                    }
+                    for index in range(6)
+                ],
+            )
+            controller.record_success(state, discovery, discovery["outputPath"])
+
+            actions = controller.next_actions(state, 3)
+
+            self.assertEqual(3, len(actions))
+            self.assertTrue(all(action["kind"] == "metadata" for action in actions))
+            self.assertEqual(3, len({action["batchId"] for action in actions}))
+
+    def test_parallel_scheduler_keeps_discovery_sequential(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(arguments(run_dir))
+
+            actions = controller.next_actions(state, 3)
+
+            self.assertEqual(1, len(actions))
+            self.assertEqual("discovery", actions[0]["kind"])
 
     def test_transient_metadata_failure_recovers_on_single_retry(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:

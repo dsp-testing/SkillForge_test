@@ -37,6 +37,7 @@ Inputs:
 - `maxArtifactBytes`: default `10000000`;
 - `maxQueryRetries`: default `1` retry for non-timeout transient failures;
 - `minWindowMinutes`: default `15`;
+- `maxConcurrentBatches`: default `3`;
 - `enableToolEventFallback`: default `false`;
 - `allowPartial`: default `true`;
 - `activeDays`: default `90`;
@@ -158,17 +159,27 @@ already found. Continue invoking the controller while its state is `running`;
 the agent must not independently declare the run blocked because remaining work
 is slow or numerous.
 
-Generate each action with:
+Generate the next bounded action batch with:
 
 ```bash
 python3 "$SKILL_DIR/scripts/extraction-controller.py" next \
   --state "$RUN_DIR/extraction-state.json" \
-  --out "$RUN_DIR/action.json"
+  --parallel \
+  --out "$RUN_DIR/actions.json"
 ```
 
-Pass that action file to `record-success` or `record-failure`. If `--out` is
-accidentally omitted, `next` prints the action to stdout. `--action` also
-accepts the current action ID when the action file is unavailable.
+Discovery manifests contain exactly one action because pages and timeout
+partitions are cursor-dependent. Post-discovery manifests contain up to
+`maxConcurrentBatches` actions from different session batches. Execute those
+queries concurrently, but record each success or failure sequentially through
+the controller using its action ID. Record completed successes before failures,
+and terminal failures last, so a blocked action cannot prevent sibling results
+from being persisted. Never execute two actions for the same batch
+concurrently. The controller is the only writer of extraction state.
+
+Without `--parallel`, `next` retains the single-action interface. If `--out` is
+omitted, `next` prints the action or manifest to stdout. `--action` accepts a
+current parallel action ID when an individual action file is unavailable.
 
 ### 4. Handle irreducible query failures
 

@@ -43,6 +43,7 @@
             "maxRows",
             "maxArtifactBytes",
             "minWindowMinutes",
+            "maxConcurrentBatches",
             "maxQueryRetries",
             "allowPartial",
             "enableToolEventFallback"
@@ -54,6 +55,7 @@
             "maxRows": { "type": "integer", "minimum": 1 },
             "maxArtifactBytes": { "type": "integer", "minimum": 1 },
             "minWindowMinutes": { "type": "integer", "minimum": 1 },
+            "maxConcurrentBatches": { "type": "integer", "minimum": 1 },
             "maxQueryRetries": { "type": "integer", "minimum": 0 },
             "allowPartial": { "type": "boolean" },
             "enableToolEventFallback": { "type": "boolean" }
