@@ -10,12 +10,10 @@ import json
 
 from session_queries import (
     build_discovery_query,
-    build_event_metadata_query,
     build_event_tool_calls_query,
     build_files_query,
     build_metadata_query,
     build_refs_query,
-    build_shutdown_query,
     build_tool_calls_query,
 )
 
@@ -27,8 +25,6 @@ def main() -> None:
         choices=(
             "discovery",
             "metadata",
-            "metadata-events",
-            "shutdown",
             "refs",
             "files",
             "tool-calls",
@@ -40,6 +36,7 @@ def main() -> None:
     parser.add_argument("--end", help="Exclusive UTC timestamp")
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--after-session-id")
+    parser.add_argument("--after-updated-at")
     parser.add_argument("--after-tool-call-id")
     parser.add_argument("--after-turn-index", type=int)
     parser.add_argument("--after-ref-type")
@@ -64,32 +61,25 @@ def main() -> None:
         if args.kind == "discovery":
             if not args.repository or not args.start or not args.end:
                 raise ValueError("discovery requires --repository, --start, and --end")
+            if bool(args.after_session_id) != bool(args.after_updated_at):
+                raise ValueError(
+                    "discovery cursor requires --after-session-id and --after-updated-at"
+                )
+            cursor = None
             if args.after_session_id:
-                raise ValueError("discovery does not support --after-session-id")
+                cursor = {
+                    "sessionId": args.after_session_id,
+                    "updatedAt": args.after_updated_at,
+                }
             query = build_discovery_query(
                 repository=args.repository,
                 start=args.start,
                 end=args.end,
                 limit=args.limit,
+                cursor=cursor,
             )
         elif args.kind == "metadata":
             query = build_metadata_query(session_ids=session_ids, limit=args.limit)
-        elif args.kind == "shutdown":
-            if len(session_ids) != 1 or not args.start or not args.end:
-                raise ValueError("shutdown requires one --session-id, --start, and --end")
-            query = build_shutdown_query(
-                session_id=session_ids[0],
-                start=args.start,
-                end=args.end,
-            )
-        elif args.kind == "metadata-events":
-            if len(session_ids) != 1 or not args.start or not args.end:
-                raise ValueError("metadata-events requires one --session-id, --start, and --end")
-            query = build_event_metadata_query(
-                session_id=session_ids[0],
-                start=args.start,
-                end=args.end,
-            )
         elif args.kind == "refs":
             if not args.start or not args.end:
                 raise ValueError("refs requires --start and --end")

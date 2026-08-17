@@ -30,8 +30,18 @@ def build_discovery_query(
     start: str,
     end: str,
     limit: int,
+    cursor: dict[str, str] | None = None,
 ) -> str:
     agents = ",\n          ".join(f"'{agent}'" for agent in SUPPORTED_AGENTS)
+    after = ""
+    if cursor:
+        after = (
+            "\n  AND (updated_at > "
+            f"TIMESTAMP '{sql_literal(cursor['updatedAt'])}'"
+            "\n       OR (updated_at = "
+            f"TIMESTAMP '{sql_literal(cursor['updatedAt'])}'"
+            f"\n           AND id > '{sql_literal(cursor['sessionId'])}'))"
+        )
     return f"""SELECT id AS session_id, updated_at
 FROM sessions
 WHERE repository = '{sql_literal(repository)}'
@@ -39,43 +49,8 @@ WHERE repository = '{sql_literal(repository)}'
   AND updated_at < TIMESTAMP '{sql_literal(end)}'
   AND agent_name IN (
           {agents}
-      )
-LIMIT {limit + 1}"""
-
-
-def build_shutdown_discovery_query(
-    *,
-    start: str,
-    end: str,
-    limit: int,
-    after_completed_at: str | None = None,
-    after_session_id: str | None = None,
-    after_shutdown_event_id: str | None = None,
-) -> str:
-    cursor = ""
-    cursor_values = (
-        after_completed_at,
-        after_session_id,
-        after_shutdown_event_id,
-    )
-    if any(cursor_values):
-        if not all(cursor_values):
-            raise ValueError("all shutdown discovery cursor values are required")
-        cursor = (
-            "\n  AND (timestamp, session_id, id) > "
-            f"(TIMESTAMP '{sql_literal(str(after_completed_at))}', "
-            f"'{sql_literal(str(after_session_id))}', "
-            f"'{sql_literal(str(after_shutdown_event_id))}')"
-        )
-    agents = ", ".join(f"'{agent}'" for agent in SUPPORTED_AGENTS)
-    return f"""SELECT id AS shutdown_event_id, session_id,
-       timestamp AS completed_at, shutdown_type
-FROM events
-WHERE type = 'session.shutdown'
-  AND timestamp >= TIMESTAMP '{sql_literal(start)}'
-  AND timestamp < TIMESTAMP '{sql_literal(end)}'
-  AND agent_name IN ({agents}){cursor}
-ORDER BY timestamp, session_id, id
+      ){after}
+ORDER BY updated_at, id
 LIMIT {limit + 1}"""
 
 
@@ -86,44 +61,6 @@ def build_metadata_query(*, session_ids: list[str], limit: int) -> str:
 FROM sessions s
 WHERE s.id IN ({ids})
 ORDER BY s.updated_at, s.id
-LIMIT {limit + 1}"""
-
-
-def build_shutdown_query(
-    *,
-    session_id: str,
-    start: str,
-    end: str,
-    limit: int = 1,
-) -> str:
-    return f"""SELECT id AS shutdown_event_id, session_id,
-       timestamp AS completed_at, shutdown_type
-FROM events
-WHERE session_id = '{sql_literal(session_id)}'
-  AND type = 'session.shutdown'
-  AND timestamp >= TIMESTAMP '{sql_literal(start)}'
-  AND timestamp < TIMESTAMP '{sql_literal(end)}'
-ORDER BY timestamp DESC, id DESC
-LIMIT {limit + 1}"""
-
-
-def build_event_metadata_query(
-    *,
-    session_id: str,
-    start: str,
-    end: str,
-    limit: int = 1,
-) -> str:
-    return f"""SELECT e.session_id,
-       arg_max(e.agent_name, e.timestamp) AS agent_name,
-       min(e.timestamp) AS created_at,
-       max(e.timestamp) AS updated_at
-FROM events e
-WHERE e.session_id = '{sql_literal(session_id)}'
-  AND e.timestamp >= TIMESTAMP '{sql_literal(start)}'
-  AND e.timestamp < TIMESTAMP '{sql_literal(end)}'
-GROUP BY e.session_id
-ORDER BY e.session_id
 LIMIT {limit + 1}"""
 
 
