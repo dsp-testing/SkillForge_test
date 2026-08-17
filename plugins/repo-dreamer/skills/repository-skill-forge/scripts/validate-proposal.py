@@ -36,7 +36,7 @@ def validate_extraction(document: dict[str, Any], errors: list[str]) -> None:
     coverage_status = extraction.get("sessionCoverageStatus")
     omissions = extraction.get("omittedUnitCount")
     kinds = extraction.get("omittedUnitKinds")
-    fallback_enabled = extraction.get("targetedFallbackEnabled")
+    fallback_enabled = extraction.get("toolEventFallbackEnabled")
     if not isinstance(discovery_complete, bool):
         errors.append("partial extraction requires discoveryComplete")
     if not isinstance(discovered, int) or discovered < 0:
@@ -74,7 +74,7 @@ def validate_extraction(document: dict[str, Any], errors: list[str]) -> None:
     ):
         errors.append("partial extraction requires omittedUnitKinds")
     if not isinstance(fallback_enabled, bool):
-        errors.append("partial extraction requires targetedFallbackEnabled")
+        errors.append("partial extraction requires toolEventFallbackEnabled")
 
 
 def validate(document: dict[str, Any]) -> list[str]:

@@ -37,7 +37,8 @@ Inputs:
 - `maxArtifactBytes`: default `10000000`;
 - `maxQueryRetries`: default `1` retry for non-timeout transient failures;
 - `minWindowMinutes`: default `15`;
-- `enableTargetedFallback`: default `false`;
+- `maxConcurrentBatches`: default `3`;
+- `enableToolEventFallback`: default `false`;
 - `allowPartial`: default `true`;
 - `activeDays`: default `90`;
 - `staleDays`: default `180`;
@@ -114,8 +115,9 @@ Initialize `extraction-controller.py` with the interface defaults. Its primary
 strategy is:
 
 1. select sessions updated inside the time window, returning only `id` and
-   `updated_at`, without an ordered scan, with an exact SQL repository
-   predicate in addition to the mandatory tool-level repository scope;
+   `updated_at`, ordered by `(updated_at, id)` for keyset pagination, with an
+   exact SQL repository predicate in addition to the mandatory tool-level
+   repository scope;
 2. fetch exact-ID `sessions` metadata in batches of 100;
 3. fetch bounded `session_refs` and `session_files`;
 4. fetch relevant `tool_requests` with pages of 500 and time-bounded completion
@@ -123,33 +125,29 @@ strategy is:
 
 Tool requests are selected by exact session ID. A session created before the
 incremental window but updated inside it must not be excluded.
+The materialized `sessions.updated_at` value is the timestamp of the session's
+latest event and is the workflow's completion-time proxy. Sessions are
+resumable, so the workflow does not require a separate `completed_at` value.
 
 Do not fetch turns, assistant messages, or unrelated tools. Do not run a
 separate repository-wide count query; discovery is the authoritative inventory,
 and zero discovered sessions is a successful no-evidence outcome. Every primary
 discovery query requests `discoveryPageSize + 1` rows. With the default, when
-101 rows return, discard that result and split the time window; accept a
-partition only when it returns at most 100 rows. The 24-hour overlap covers
-sessions that move between time partitions while discovery is running.
+101 rows return, accept the first 100 and continue after the last
+`(updated_at, id)` pair. Process each successful page before requesting the
+next page. The 24-hour overlap covers sessions that move between extraction
+windows, and stable session IDs deduplicate overlap.
 
 Retry only non-timeout transient network, rate-limit, or server failures, at
-most once. No timeout repeats the identical action. With
-`enableTargetedFallback=true`, a timeout, network, rate-limit, or server failure
-in primary discovery immediately replaces the failed range with three-hour
-partitions that use the ordered `session.shutdown` inventory strategy. The
-`events` table has no repository column, so fallback uses the mandatory
-tool-level repository scope rather than an invalid SQL predicate. A failed
-untouched three-hour fallback partition is divided once into one-hour
-partitions. A shorter edge partition uses one-hour windows plus its final
-remainder. Partitions with successful earlier pages retain their recovered
-sessions and are not split. Each failed one-hour action is immediately omitted
-when partial extraction is allowed. The fallback is paginated, but no failed
-action is retried unchanged.
-With fallback disabled, primary timeout and overflow partitions retain adaptive
-time splitting down to `minWindowMinutes`. Syntax, schema, validation,
-authorization, and genuinely unknown failures are not retryable. Discovery has
-no global failure-count or elapsed-time budget. With `--fail-on-omission`, any
-irreducible discovery failure blocks.
+most once. No timeout repeats the identical action. Primary discovery timeout
+before the first successful page uses adaptive time splitting down to
+`minWindowMinutes`. A timeout after one or more pages discloses the uncollected
+remainder without discarding accepted sessions. There is no `session.shutdown`
+discovery fallback.
+Exact-session metadata comes only from the materialized `sessions` table.
+Syntax, schema, validation, authorization, and genuinely unknown failures are
+not retryable. Discovery has no global failure-count or elapsed-time budget.
+With `--fail-on-omission`, any irreducible discovery failure blocks.
 
 Every query success or failure must be recorded through
 `extraction-controller.py`. Never retry a query manually, alter controller SQL
@@ -161,49 +159,51 @@ already found. Continue invoking the controller while its state is `running`;
 the agent must not independently declare the run blocked because remaining work
 is slow or numerous.
 
-Generate each action with:
+Generate the next bounded action batch with:
 
 ```bash
 python3 "$SKILL_DIR/scripts/extraction-controller.py" next \
   --state "$RUN_DIR/extraction-state.json" \
-  --out "$RUN_DIR/action.json"
+  --parallel \
+  --out "$RUN_DIR/actions.json"
 ```
 
-Pass that action file to `record-success` or `record-failure`. If `--out` is
-accidentally omitted, `next` prints the action to stdout. `--action` also
-accepts the current action ID when the action file is unavailable.
+Discovery manifests contain exactly one action because pages and timeout
+partitions are cursor-dependent. Post-discovery manifests contain up to
+`maxConcurrentBatches` actions from different session batches. Execute those
+queries concurrently, but record each success or failure sequentially through
+the controller using its action ID. Record completed successes before failures,
+and terminal failures last, so a blocked action cannot prevent sibling results
+from being persisted. Never execute two actions for the same batch
+concurrently. The controller is the only writer of extraction state.
+
+Without `--parallel`, `next` retains the single-action interface. If `--out` is
+omitted, `next` prints the action or manifest to stdout. `--action` accepts a
+current parallel action ID when an individual action file is unavailable.
 
 ### 4. Handle irreducible query failures
 
-Targeted shutdown/event fallback is opt-in. With the default
-`enableTargetedFallback=false`, primary discovery retains adaptive splitting,
-and a timed-out post-discovery unit is omitted without an identical retry or
-page-size reduction when partial mode is enabled.
+Tool-event fallback is opt-in. With the default
+`enableToolEventFallback=false`, a timed-out post-discovery unit is omitted
+without an identical retry or page-size reduction when partial mode is enabled.
 
-When `enableTargetedFallback=true`:
+When `enableToolEventFallback=true`:
 
-1. a primary discovery range that fails from timeout, network, rate-limit, or
-   server error switches directly to bounded three-hour, cursor-paginated
-   `session.shutdown` inventory;
-2. a failed untouched three-hour shutdown-inventory partition is split into
-   one-hour partitions, while a later paginated failure preserves prior pages;
-   a failed one-hour partition is omitted in partial mode;
-3. a timed-out exact-session tool unit immediately switches from
+1. a timed-out exact-session tool unit immediately switches from
    `tool_requests` to bounded `tool.execution_start` and
    `tool.execution_complete` events; a failed event fallback is omitted;
-4. a timed-out exact-session metadata unit immediately queries the session's
-   latest bounded `session.shutdown`, then derives metadata from that shutdown
-   day; a failed metadata fallback is omitted;
-5. timed-out `session_refs` and `session_files` units are omitted immediately
+2. timed-out exact-session metadata is omitted because the materialized
+   `sessions` table is authoritative;
+3. timed-out `session_refs` and `session_files` units are omitted immediately
    because reducing `LIMIT` does not avoid their expensive scan and ordering.
 
-Fallback applies only to the failed discovery range or extraction unit. It does
-not replace successful primary discovery partitions or query outside the
-selected evidence window.
+Fallback applies only to the failed tool extraction unit and does not query
+outside the selected evidence window.
 
-With default `allowPartial=true`, irreducible discovery windows are recorded by
-time range, and irreducible post-discovery units are recorded with
-repository-salted session hashes. Use `--fail-on-omission` for fail-closed
+With default `allowPartial=true`, irreducible timeout or exhausted transient
+discovery windows are recorded by time range, and irreducible post-discovery
+units are recorded with repository-salted session hashes. Use
+`--fail-on-omission` for fail-closed
 behavior. A disclosed partial run is successful and advances durable state after
 validation, reconciliation, and the publication or no-publication decision.
 
@@ -263,7 +263,7 @@ For a partial run, also disclose:
 - session coverage ratio when known, otherwise that coverage is unknown;
 - omission count;
 - omitted unit kinds;
-- whether targeted fallback was enabled.
+- whether tool-event fallback was enabled.
 
 Never describe partial evidence as complete.
 
@@ -299,12 +299,13 @@ coverage unknown and may permanently exclude patterns from that window.
 ## Assets
 
 - `scripts/extraction-controller.py`: deployed fast extraction plus optional
-  targeted fallback and explicit partial omissions.
+  tool-event fallback and explicit partial omissions.
 - `scripts/issue-state.py`: strict managed issue-state parser and renderer.
 - `scripts/aggregate-primitives.py`: compact observation merge and scoring.
 - `scripts/proposal-ledger.py`: stable proposal reconciliation and sequential
   queue selection.
-- `scripts/session_queries.py`: fast primary and opt-in targeted fallback SQL.
+- `scripts/session_queries.py`: materialized session queries and opt-in
+  tool-event fallback SQL.
 - `assets/schemas.json`: extraction, state, queue, and history contracts.
 
 **Abstraction level:** strategic

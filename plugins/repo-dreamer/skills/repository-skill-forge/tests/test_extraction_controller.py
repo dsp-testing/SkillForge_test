@@ -15,7 +15,7 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = SKILL_DIR / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from session_queries import build_discovery_query, build_shutdown_discovery_query
+from session_queries import build_discovery_query
 
 CONTROLLER_SPEC = importlib.util.spec_from_file_location(
     "extraction_controller",
@@ -46,9 +46,10 @@ def arguments(run_dir: str, **overrides: object) -> argparse.Namespace:
         "max_rows": 1000,
         "max_artifact_bytes": 10_000_000,
         "min_window_minutes": 15,
+        "max_concurrent_batches": 3,
         "max_query_retries": 1,
         "allow_partial": True,
-        "enable_targeted_fallback": False,
+        "enable_tool_event_fallback": False,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -61,63 +62,60 @@ def write_rows(path: str, rows: list[dict[str, object]]) -> None:
 
 
 class ExtractionControllerTests(unittest.TestCase):
-    def test_discovery_uses_narrow_unordered_query(self) -> None:
+    def test_discovery_uses_ordered_keyset_query(self) -> None:
         query = build_discovery_query(
             repository="owner/repository",
             start="2026-08-01T00:00:00Z",
             end="2026-08-08T00:00:00Z",
             limit=100,
+            cursor={
+                "updatedAt": "2026-08-04T12:00:00Z",
+                "sessionId": "session-100",
+            },
         )
 
         self.assertTrue(query.startswith("SELECT id AS session_id, updated_at"))
-        self.assertNotIn("ORDER BY", query)
+        self.assertIn("ORDER BY updated_at, id", query)
+        self.assertIn("id > 'session-100'", query)
         self.assertNotIn("agent_name, repository, branch", query)
 
-    def test_discovery_timeout_switches_to_three_hour_shutdown_fallback(self) -> None:
-        with tempfile.TemporaryDirectory() as run_dir:
-            state = controller.initialize(
-                arguments(run_dir, enable_targeted_fallback=True)
+    def test_discovery_rejects_malformed_cursor(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "discovery cursor requires non-empty updatedAt and sessionId",
+        ):
+            build_discovery_query(
+                repository="owner/repository",
+                start="2026-08-01T00:00:00Z",
+                end="2026-08-08T00:00:00Z",
+                limit=100,
+                cursor={"updatedAt": "2026-08-04T12:00:00Z"},
             )
+
+    def test_discovery_timeout_splits_materialized_session_window(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(arguments(run_dir))
             action = controller.next_action(state)
             assert action is not None
 
             controller.record_failure(state, action, "query timed out")
-            fallback = controller.next_action(state)
-            assert fallback is not None
+            next_action = controller.next_action(state)
+            assert next_action is not None
 
-            self.assertEqual(56, len(state["partitions"]))
-            self.assertEqual("shutdown_events", fallback["strategy"])
-            self.assertIn("type = 'session.shutdown'", fallback["sql"])
+            self.assertEqual(2, len(state["partitions"]))
+            self.assertEqual("sessions", next_action["strategy"])
             self.assertEqual(
-                "2026-08-01T03:00:00Z",
+                "2026-08-04T12:00:00Z",
                 state["partitions"][0]["end"],
             )
-            self.assertEqual(0, state["partitions"][0]["fallbackSplitDepth"])
             self.assertFalse(
                 any(item["kind"] == "retry_same_unit" for item in state["retryHistory"])
             )
             self.assertEqual("running", state["status"])
 
-    def test_shutdown_discovery_query_is_ordered_and_cursor_bounded(self) -> None:
-        query = build_shutdown_discovery_query(
-            start="2026-08-01T00:00:00Z",
-            end="2026-08-02T00:00:00Z",
-            limit=100,
-            after_completed_at="2026-08-01T12:00:00Z",
-            after_session_id="session-1",
-            after_shutdown_event_id="event-1",
-        )
-
-        self.assertIn("type = 'session.shutdown'", query)
-        self.assertNotIn("repository =", query)
-        self.assertIn("ORDER BY timestamp, session_id, id", query)
-        self.assertIn("(timestamp, session_id, id) >", query)
-
-    def test_unicorn_discovery_failure_switches_to_fallback(self) -> None:
+    def test_unicorn_discovery_failure_splits_materialized_session_window(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
-            state = controller.initialize(
-                arguments(run_dir, enable_targeted_fallback=True)
-            )
+            state = controller.initialize(arguments(run_dir))
             primary = controller.next_action(state)
             assert primary is not None
 
@@ -127,17 +125,16 @@ class ExtractionControllerTests(unittest.TestCase):
                 "SQL Error: GitHub Unicorn HTML response",
                 error_kind="other",
             )
-            fallback = controller.next_action(state)
+            next_action = controller.next_action(state)
 
             self.assertEqual("running", state["status"])
-            self.assertEqual("shutdown_events", fallback["strategy"])
+            self.assertEqual("sessions", next_action["strategy"])
+            self.assertEqual(2, len(state["partitions"]))
             self.assertFalse(state["blockers"])
 
     def test_explicit_other_is_not_reclassified_as_deterministic_kind(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
-            state = controller.initialize(
-                arguments(run_dir, enable_targeted_fallback=True)
-            )
+            state = controller.initialize(arguments(run_dir))
             primary = controller.next_action(state)
             assert primary is not None
 
@@ -151,145 +148,9 @@ class ExtractionControllerTests(unittest.TestCase):
             self.assertEqual("blocked", state["status"])
             self.assertEqual("other", state["blockers"][-1]["errorKind"])
 
-    def test_fallback_success_extracts_before_next_discovery_window(self) -> None:
+    def test_discovery_overflow_pages_without_splitting(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
-            state = controller.initialize(
-                arguments(run_dir, enable_targeted_fallback=True)
-            )
-            primary = controller.next_action(state)
-            assert primary is not None
-            controller.record_failure(state, primary, "query timed out")
-            fallback = controller.next_action(state)
-            assert fallback is not None
-            write_rows(
-                fallback["outputPath"],
-                [
-                    {
-                        "session_id": "session-1",
-                        "shutdown_event_id": "event-1",
-                        "completed_at": "2026-08-01T12:00:00Z",
-                        "shutdown_type": "completed",
-                    }
-                ],
-            )
-            controller.record_success(state, fallback, fallback["outputPath"])
-
-            next_action = controller.next_action(state)
-
-            self.assertEqual("metadata", next_action["kind"])
-            self.assertEqual(
-                ["session-1"],
-                state["partitions"][0]["batches"][0]["sessionIds"],
-            )
-            self.assertFalse(state["partitions"][1]["discoveryComplete"])
-
-    def test_fallback_timeout_splits_to_one_hour_then_omits(self) -> None:
-        with tempfile.TemporaryDirectory() as run_dir:
-            state = controller.initialize(
-                arguments(run_dir, enable_targeted_fallback=True)
-            )
-            primary = controller.next_action(state)
-            assert primary is not None
-            controller.record_failure(state, primary, "query timed out")
-            fallback = controller.next_action(state)
-            assert fallback is not None
-
-            controller.record_failure(state, fallback, "query timed out")
-            one_hour_action = controller.next_action(state)
-            assert one_hour_action is not None
-
-            self.assertEqual(58, len(state["partitions"]))
-            self.assertEqual(
-                "2026-08-01T01:00:00Z",
-                state["partitions"][0]["end"],
-            )
-            self.assertEqual(1, state["partitions"][0]["fallbackSplitDepth"])
-            self.assertEqual(
-                "split_shutdown_fallback",
-                state["retryHistory"][-1]["kind"],
-            )
-
-            controller.record_failure(state, one_hour_action, "query timed out")
-            next_action = controller.next_action(state)
-
-            self.assertEqual("omitted", state["partitions"][0]["status"])
-            self.assertEqual("discovery", state["omittedUnits"][0]["kind"])
-            self.assertEqual("shutdown_events", next_action["strategy"])
-            self.assertEqual(
-                state["partitions"][1]["partitionId"],
-                next_action["partitionId"],
-            )
-
-    def test_fallback_split_uses_hourly_edge_partitions(self) -> None:
-        with tempfile.TemporaryDirectory() as run_dir:
-            state = controller.initialize(
-                arguments(
-                    run_dir,
-                    start="2026-08-01T00:00:00Z",
-                    end="2026-08-01T02:30:00Z",
-                    enable_targeted_fallback=True,
-                )
-            )
-            primary = controller.next_action(state)
-            assert primary is not None
-            controller.record_failure(state, primary, "query timed out")
-            fallback = controller.next_action(state)
-            assert fallback is not None
-
-            controller.record_failure(state, fallback, "query timed out")
-
-            self.assertEqual(
-                [
-                    ("2026-08-01T00:00:00Z", "2026-08-01T01:00:00Z"),
-                    ("2026-08-01T01:00:00Z", "2026-08-01T02:00:00Z"),
-                    ("2026-08-01T02:00:00Z", "2026-08-01T02:30:00Z"),
-                ],
-                [
-                    (partition["start"], partition["end"])
-                    for partition in state["partitions"]
-                ],
-            )
-
-    def test_paginated_fallback_failure_preserves_recovered_work(self) -> None:
-        with tempfile.TemporaryDirectory() as run_dir:
-            state = controller.initialize(
-                arguments(run_dir, enable_targeted_fallback=True)
-            )
-            primary = controller.next_action(state)
-            assert primary is not None
-            controller.record_failure(state, primary, "query timed out")
-            fallback = controller.next_action(state)
-            assert fallback is not None
-            partition = state["partitions"][0]
-            partition["discoveryCursor"] = {
-                "completedAt": "2026-08-01T00:30:00Z",
-                "sessionId": "session-1",
-                "shutdownEventId": "event-1",
-            }
-            partition["sessions"] = [{"session_id": "session-1"}]
-            partition["batches"] = [
-                {
-                    "batchId": "batch-1",
-                    "sessionIds": ["session-1"],
-                    "status": "complete",
-                }
-            ]
-
-            controller.record_failure(state, fallback, "query timed out")
-
-            self.assertEqual(56, len(state["partitions"]))
-            self.assertEqual("omitted", partition["status"])
-            self.assertEqual(
-                [{"session_id": "session-1"}],
-                partition["sessions"],
-            )
-            self.assertEqual("batch-1", partition["batches"][0]["batchId"])
-
-    def test_discovery_overflow_splits_without_accepting_rows(self) -> None:
-        with tempfile.TemporaryDirectory() as run_dir:
-            state = controller.initialize(
-                arguments(run_dir, enable_targeted_fallback=True)
-            )
+            state = controller.initialize(arguments(run_dir))
             discovery = controller.next_action(state)
             assert discovery is not None
             rows = [
@@ -302,13 +163,56 @@ class ExtractionControllerTests(unittest.TestCase):
             write_rows(discovery["outputPath"], rows)
             controller.record_success(state, discovery, discovery["outputPath"])
 
-            next_partition = controller.next_action(state)
+            metadata = controller.next_action(state)
 
-            self.assertEqual("discovery", next_partition["kind"])
-            self.assertEqual(2, len(state["partitions"]))
-            self.assertTrue(
-                all(not partition["sessions"] for partition in state["partitions"])
+            self.assertEqual("metadata", metadata["kind"])
+            self.assertEqual(1, len(state["partitions"]))
+            self.assertEqual(100, len(state["partitions"][0]["sessions"]))
+            self.assertEqual(
+                {
+                    "updatedAt": "2026-08-07T12:00:00Z",
+                    "sessionId": "session-099",
+                },
+                state["partitions"][0]["discoveryCursor"],
             )
+
+    def test_parallel_scheduler_returns_three_independent_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(
+                arguments(
+                    run_dir,
+                    discovery_page_size=10,
+                    session_batch_size=2,
+                )
+            )
+            discovery = controller.next_action(state)
+            assert discovery is not None
+            write_rows(
+                discovery["outputPath"],
+                [
+                    {
+                        "session_id": f"session-{index}",
+                        "updated_at": f"2026-08-07T12:0{index}:00Z",
+                    }
+                    for index in range(6)
+                ],
+            )
+            controller.record_success(state, discovery, discovery["outputPath"])
+
+            actions = controller.next_actions(state, 3)
+
+            self.assertEqual(3, len(actions))
+            self.assertTrue(all(action["kind"] == "metadata" for action in actions))
+            self.assertEqual(3, len({action["batchId"] for action in actions}))
+
+    def test_parallel_scheduler_keeps_discovery_sequential(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(arguments(run_dir))
+
+            actions = controller.next_actions(state, 3)
+
+            self.assertEqual(1, len(actions))
+            self.assertEqual("discovery", actions[0]["kind"])
 
     def test_transient_metadata_failure_recovers_on_single_retry(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
@@ -348,13 +252,13 @@ class ExtractionControllerTests(unittest.TestCase):
                 if item["kind"] == "retry_same_unit"
             ]
             self.assertEqual(1, len(retries))
-            self.assertEqual("refs", state["partitions"][0]["batches"][0]["status"])
+            batch = state["partitions"][0]["batches"][0]
+            self.assertEqual("refs", batch["status"])
+            self.assertEqual("2026-08-07T12:01:00Z", batch["sourceEnd"])
 
-    def test_metadata_timeout_switches_directly_to_fallback(self) -> None:
+    def test_metadata_timeout_omits_single_session_batch(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
-            state = controller.initialize(
-                arguments(run_dir, enable_targeted_fallback=True)
-            )
+            state = controller.initialize(arguments(run_dir))
             discovery = controller.next_action(state)
             assert discovery is not None
             write_rows(
@@ -366,10 +270,12 @@ class ExtractionControllerTests(unittest.TestCase):
             assert metadata is not None
 
             controller.record_failure(state, metadata, "query timed out")
-            fallback = controller.next_action(state)
-            assert fallback is not None
+            done = controller.next_action(state)
+            batch = state["partitions"][0]["batches"][0]
 
-            self.assertEqual("metadata-shutdown", fallback["kind"])
+            self.assertIsNone(done)
+            self.assertEqual("partial", state["status"])
+            self.assertEqual("omitted", batch["status"])
             self.assertFalse(
                 any(
                     item["kind"] == "retry_same_unit"
@@ -454,7 +360,7 @@ class ExtractionControllerTests(unittest.TestCase):
     def test_tool_timeout_uses_event_fallback_then_omits(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(
-                arguments(run_dir, enable_targeted_fallback=True)
+                arguments(run_dir, enable_tool_event_fallback=True)
             )
             discovery = controller.next_action(state)
             assert discovery is not None
@@ -484,11 +390,9 @@ class ExtractionControllerTests(unittest.TestCase):
             self.assertEqual("partial", state["status"])
             self.assertEqual("omitted", batch["status"])
 
-    def test_discovery_continues_after_four_one_hour_fallback_omissions(self) -> None:
+    def test_discovery_continues_after_four_materialized_window_omissions(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
-            state = controller.initialize(
-                arguments(run_dir, enable_targeted_fallback=True)
-            )
+            state = controller.initialize(arguments(run_dir))
             primary = controller.next_action(state)
             assert primary is not None
             controller.record_failure(state, primary, "query timed out")
@@ -499,7 +403,13 @@ class ExtractionControllerTests(unittest.TestCase):
 
             self.assertEqual("running", state["status"])
             self.assertEqual(4, len(state["omittedUnits"]))
-            self.assertEqual(60, len(state["partitions"]))
+            self.assertEqual(11, len(state["partitions"]))
+            self.assertTrue(
+                all(
+                    item["kind"] == "split_time"
+                    for item in state["retryHistory"]
+                )
+            )
 
     def test_irreducible_discovery_timeout_becomes_partial_omission(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
@@ -528,7 +438,7 @@ class ExtractionControllerTests(unittest.TestCase):
                 state["omittedUnits"][0]["windowStart"],
             )
 
-    def test_irreducible_dense_discovery_becomes_partial_omission(self) -> None:
+    def test_irreducible_dense_discovery_uses_keyset_pagination(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(
                 arguments(
@@ -552,12 +462,54 @@ class ExtractionControllerTests(unittest.TestCase):
             )
 
             controller.record_success(state, action, action["outputPath"])
+
+            self.assertEqual("running", state["status"])
+            self.assertFalse(state["omittedUnits"])
+            self.assertEqual(100, len(state["partitions"][0]["sessions"]))
+            self.assertFalse(state["partitions"][0]["discoveryComplete"])
+
+    def test_later_discovery_page_timeout_retains_accepted_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(
+                arguments(
+                    run_dir,
+                    start="2026-08-01T00:00:00Z",
+                    end="2026-08-01T00:20:00Z",
+                    discovery_page_size=2,
+                    min_window_minutes=15,
+                )
+            )
+            first_page = controller.next_action(state)
+            assert first_page is not None
+            write_rows(
+                first_page["outputPath"],
+                [
+                    {
+                        "session_id": f"session-{index}",
+                        "updated_at": f"2026-08-01T00:0{index}:00Z",
+                    }
+                    for index in range(3)
+                ],
+            )
+            controller.record_success(state, first_page, first_page["outputPath"])
+            state["partitions"][0]["batches"][0]["status"] = "complete"
+
+            second_page = controller.next_action(state)
+            assert second_page is not None
+            self.assertEqual("discovery", second_page["kind"])
+            self.assertIn("id > 'session-1'", second_page["sql"])
+
+            controller.record_failure(state, second_page, "query timed out")
             controller.next_action(state)
 
             self.assertEqual("partial", state["status"])
+            self.assertEqual(2, len(state["partitions"][0]["sessions"]))
             self.assertEqual(
-                "discovery_partition_too_dense",
-                state["omittedUnits"][0]["reason"],
+                {
+                    "updatedAt": "2026-08-01T00:01:00Z",
+                    "sessionId": "session-1",
+                },
+                state["omittedUnits"][0]["cursor"],
             )
 
     def test_nonrecoverable_discovery_error_blocks_without_splitting(self) -> None:
@@ -579,7 +531,7 @@ class ExtractionControllerTests(unittest.TestCase):
                 any(item["kind"] == "split_time" for item in state["retryHistory"])
             )
 
-    def test_irreducible_transient_discovery_error_blocks_without_batch_lookup(self) -> None:
+    def test_irreducible_transient_discovery_error_becomes_partial_omission(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(
                 arguments(
@@ -605,8 +557,11 @@ class ExtractionControllerTests(unittest.TestCase):
                 error_kind="server",
             )
 
-            self.assertEqual("blocked", state["status"])
-            self.assertEqual("server error 503", state["blockers"][-1]["reason"])
+            controller.next_action(state)
+
+            self.assertEqual("partial", state["status"])
+            self.assertFalse(state["blockers"])
+            self.assertEqual("server error 503", state["omittedUnits"][-1]["reason"])
 
     def test_action_id_can_replace_missing_action_file(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
@@ -618,7 +573,7 @@ class ExtractionControllerTests(unittest.TestCase):
 
             self.assertEqual(action, loaded)
 
-    def test_discovery_cli_rejects_session_cursor(self) -> None:
+    def test_discovery_cli_rejects_incomplete_session_cursor(self) -> None:
         result = subprocess.run(
             [
                 sys.executable,
@@ -641,7 +596,7 @@ class ExtractionControllerTests(unittest.TestCase):
 
         self.assertNotEqual(0, result.returncode)
         self.assertIn(
-            "discovery does not support --after-session-id",
+            "discovery cursor requires --after-session-id and --after-updated-at",
             result.stderr,
         )
 
@@ -660,7 +615,7 @@ class ExtractionControllerTests(unittest.TestCase):
                 "sessionCoverageStatus": "unknown",
                 "omittedUnitCount": 1,
                 "omittedUnitKinds": ["discovery"],
-                "targetedFallbackEnabled": False,
+                "toolEventFallbackEnabled": False,
             },
             "review": {
                 "leakageFindingCount": 0,
