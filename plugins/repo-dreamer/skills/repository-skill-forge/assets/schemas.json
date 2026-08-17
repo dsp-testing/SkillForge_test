@@ -125,6 +125,24 @@
             "additionalProperties": false
           }
         },
+        "issuedActions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["actionId", "kind", "partitionId", "limit", "outputPath", "sql"],
+            "properties": {
+              "actionId": { "type": "string" },
+              "kind": { "type": "string" },
+              "partitionId": { "type": "string" },
+              "batchId": { "type": "string" },
+              "limit": { "type": "integer", "minimum": 1 },
+              "outputPath": { "type": "string" },
+              "strategy": { "type": "string" },
+              "sql": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        },
         "handledActionIds": { "type": "array", "items": { "type": "string" } },
         "workCounters": {
           "type": "object",
