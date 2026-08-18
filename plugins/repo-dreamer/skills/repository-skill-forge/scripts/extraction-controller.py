@@ -100,6 +100,7 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
         "strategyHistory": [],
         "blockers": [],
         "omittedUnits": [],
+        "issuedActions": [],
         "handledActionIds": [],
         "workCounters": {
             "queryAttempts": 0,
@@ -210,6 +211,30 @@ def next_actions(
         return []
     if max_actions < 1:
         raise ValueError("max actions must be positive")
+    issued = state.setdefault("issuedActions", [])
+    if issued:
+        actions = issued[:max_actions]
+        if len(actions) == max_actions or any(
+            action.get("kind") == "discovery" for action in actions
+        ):
+            return actions
+        issued_batch_ids = {
+            str(action["batchId"])
+            for action in issued
+            if action.get("batchId")
+        }
+        for partition in state["partitions"]:
+            for batch in partition["batches"]:
+                if batch["batchId"] in issued_batch_ids:
+                    continue
+                action = next_batch_action(state, partition, batch)
+                if action is not None:
+                    issued.append(action)
+                    actions.append(action)
+                    issued_batch_ids.add(batch["batchId"])
+                    if len(actions) == max_actions:
+                        return actions
+        return actions
     limits = state["limits"]
     actions = []
     for partition in state["partitions"]:
@@ -218,10 +243,12 @@ def next_actions(
             if action is not None:
                 actions.append(action)
                 if len(actions) == max_actions:
+                    state["issuedActions"] = actions
                     return actions
         if partition["discoveryComplete"] and partition["status"] != "omitted":
             partition["status"] = "complete"
     if actions:
+        state["issuedActions"] = actions
         return actions
     for partition in state["partitions"]:
         if not partition["discoveryComplete"]:
@@ -229,7 +256,7 @@ def next_actions(
                 f"discover-sessions-{partition['partitionId']}"
                 f"-{partition.get('discoveryPage', 0)}"
             )
-            return [{
+            actions = [{
                 "actionId": action_id,
                 "kind": "discovery",
                 "partitionId": partition["partitionId"],
@@ -244,6 +271,8 @@ def next_actions(
                     cursor=partition.get("discoveryCursor"),
                 ),
             }]
+            state["issuedActions"] = actions
+            return actions
     finalize_extraction(state)
     return []
 
@@ -384,6 +413,14 @@ def make_batches(session_ids: list[str], size: int, tool_page_size: int) -> list
     ]
 
 
+def release_issued_action(state: dict[str, Any], action_id: str) -> None:
+    state["issuedActions"] = [
+        action
+        for action in state.setdefault("issuedActions", [])
+        if action.get("actionId") != action_id
+    ]
+
+
 def validate_result(
     state: dict[str, Any],
     action: dict[str, Any],
@@ -455,6 +492,7 @@ def record_success(
     artifact_bytes = Path(result_path).stat().st_size
     record_attempt(state, artifact_bytes=artifact_bytes)
     rows, _ = validate_result(state, action, result_path)
+    release_issued_action(state, action["actionId"])
     counters = work_counters(state)
     counters["rows"] += len(rows)
     if action["kind"] == "tool-calls":
@@ -707,6 +745,124 @@ def split_batch(state: dict[str, Any], partition: dict[str, Any], batch: dict[st
     return activate_tool_fallback(state, batch, reason)
 
 
+def filtered_artifact(
+    state: dict[str, Any],
+    source_path: str,
+    child_batch_id: str,
+    artifact_kind: str,
+    artifact_index: int,
+    session_ids: set[str],
+) -> str:
+    rows = read_json(source_path)
+    if not isinstance(rows, list):
+        raise ValueError("batch artifact must be a JSON array")
+    filtered = [
+        row
+        for row in rows
+        if isinstance(row, dict) and str(row.get("session_id")) in session_ids
+    ]
+    output_path = str(
+        Path(state["runDir"])
+        / "extraction"
+        / f"split-{child_batch_id}-{artifact_kind}-{artifact_index}.json"
+    )
+    write_json(output_path, filtered)
+    return output_path
+
+
+def split_tool_batch(
+    state: dict[str, Any],
+    partition: dict[str, Any],
+    batch: dict[str, Any],
+    reason: str,
+) -> bool:
+    session_ids = batch["sessionIds"]
+    if batch["status"] != "tools" or len(session_ids) <= 1:
+        return False
+    midpoint = len(session_ids) // 2
+    replacements = make_batches(
+        session_ids[:midpoint],
+        len(session_ids),
+        batch["pageSize"],
+    ) + make_batches(
+        session_ids[midpoint:],
+        len(session_ids),
+        batch["pageSize"],
+    )
+    for replacement in replacements:
+        child_ids = {str(session_id) for session_id in replacement["sessionIds"]}
+        replacement["status"] = "tools"
+        replacement["metadataArtifact"] = filtered_artifact(
+            state,
+            batch["metadataArtifact"],
+            replacement["batchId"],
+            "metadata",
+            0,
+            child_ids,
+        )
+        metadata_rows = read_json(replacement["metadataArtifact"])
+        created_at_values = [
+            str(row["created_at"])
+            for row in metadata_rows
+            if isinstance(row, dict) and row.get("created_at")
+        ]
+        updated_at_values = [
+            str(row["updated_at"])
+            for row in metadata_rows
+            if isinstance(row, dict) and row.get("updated_at")
+        ]
+        if (
+            len(created_at_values) != len(replacement["sessionIds"])
+            or len(updated_at_values) != len(replacement["sessionIds"])
+        ):
+            raise ValueError("split tool batch requires complete metadata")
+        replacement["sourceStart"] = min(created_at_values, key=parse_timestamp)
+        replacement["sourceEnd"] = timestamp_text(
+            min(
+                parse_timestamp(partition["end"]),
+                parse_timestamp(max(updated_at_values, key=parse_timestamp))
+                + timedelta(minutes=1),
+            )
+        )
+        replacement["refsArtifacts"] = [
+            filtered_artifact(
+                state,
+                path,
+                replacement["batchId"],
+                "refs",
+                index,
+                child_ids,
+            )
+            for index, path in enumerate(batch["refsArtifacts"])
+        ]
+        replacement["filesArtifacts"] = [
+            filtered_artifact(
+                state,
+                path,
+                replacement["batchId"],
+                "files",
+                index,
+                child_ids,
+            )
+            for index, path in enumerate(batch["filesArtifacts"])
+        ]
+        replacement["toolStrategy"] = batch["toolStrategy"]
+        replacement["retryGenerations"]["tools"] = (
+            int(batch.get("retryGenerations", {}).get("tools", 0)) + 1
+        )
+    index = partition["batches"].index(batch)
+    partition["batches"][index : index + 1] = replacements
+    state["retryHistory"].append(
+        {
+            "kind": "split_tool_batch",
+            "batchId": batch["batchId"],
+            "childBatchIds": [item["batchId"] for item in replacements],
+            "reason": reason,
+        }
+    )
+    return True
+
+
 def recover_extraction_timeout(
     state: dict[str, Any],
     action: dict[str, Any],
@@ -719,7 +875,7 @@ def recover_extraction_timeout(
             return split_batch(state, partition, batch, reason)
     elif batch["status"] == "tools":
         if len(batch["sessionIds"]) > 1:
-            return split_batch(state, partition, batch, reason)
+            return split_tool_batch(state, partition, batch, reason)
         if activate_tool_fallback(state, batch, reason):
             return True
     if state["limits"]["allowPartial"]:
@@ -739,6 +895,7 @@ def record_failure(
 ) -> None:
     if action["actionId"] in state["handledActionIds"]:
         return
+    release_issued_action(state, action["actionId"])
     if count_attempt:
         record_attempt(state)
     work_counters(state)["failedQueries"] += 1
@@ -816,11 +973,11 @@ def record_failure(
     if action["kind"] == "discovery":
         recovered = split_partition(state, partition, reason)
     else:
-        recovered = split_batch(
-            state,
-            partition,
-            find_batch(partition, action["batchId"]),
-            reason,
+        batch = find_batch(partition, action["batchId"])
+        recovered = (
+            split_tool_batch(state, partition, batch, reason)
+            if batch["status"] == "tools"
+            else split_batch(state, partition, batch, reason)
         )
     if recovered:
         state["handledActionIds"].append(action["actionId"])
@@ -911,6 +1068,9 @@ def load_action(value: str, state: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(action, dict):
             raise ValueError("action must be a JSON object")
         return action
+    for action in state.setdefault("issuedActions", []):
+        if action.get("actionId") == value:
+            return action
     for action in next_actions(
         state,
         int(state["limits"].get("maxConcurrentBatches", 1)),

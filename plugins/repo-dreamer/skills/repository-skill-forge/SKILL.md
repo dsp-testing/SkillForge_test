@@ -172,10 +172,12 @@ Discovery manifests contain exactly one action because pages and timeout
 partitions are cursor-dependent. Post-discovery manifests contain up to
 `maxConcurrentBatches` actions from different session batches. Execute those
 queries concurrently, but record each success or failure sequentially through
-the controller using its action ID. Record completed successes before failures,
-and terminal failures last, so a blocked action cannot prevent sibling results
-from being persisted. Never execute two actions for the same batch
-concurrently. The controller is the only writer of extraction state.
+the controller using its action ID. Issued actions remain persisted until their
+individual result is recorded, so recording one action cannot invalidate its
+siblings. Record completed successes before failures, and terminal failures
+last, so a blocked action cannot prevent sibling results from being persisted.
+Never execute two actions for the same batch concurrently. The controller is
+the only writer of extraction state.
 
 Without `--parallel`, `next` retains the single-action interface. If `--out` is
 omitted, `next` prints the action or manifest to stdout. `--action` accepts a
@@ -191,7 +193,9 @@ When `enableToolEventFallback=true`:
 
 1. a timed-out exact-session tool unit immediately switches from
    `tool_requests` to bounded `tool.execution_start` and
-   `tool.execution_complete` events; a failed event fallback is omitted;
+   `tool.execution_complete` events; larger timed-out tool batches split only
+   the tool stage and reuse completed metadata, reference, and file artifacts;
+   a failed single-session event fallback is omitted;
 2. timed-out exact-session metadata is omitted because the materialized
    `sessions` table is authoritative;
 3. timed-out `session_refs` and `session_files` units are omitted immediately
