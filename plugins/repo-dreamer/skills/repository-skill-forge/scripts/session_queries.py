@@ -139,62 +139,24 @@ def build_tool_calls_query(
     after_session_id: str | None = None,
     after_tool_call_id: str | None = None,
 ) -> str:
+    _ = start, end  # Retained for query-builder interface compatibility.
     ids = sql_values(session_ids)
     cursor = ""
     if after_session_id or after_tool_call_id:
         if not after_session_id or not after_tool_call_id:
             raise ValueError("both tool-call cursor values are required")
         cursor = (
-            "\n      AND (tr.session_id, tr.tool_call_id) > "
+            "\n  AND (tr.session_id, tr.tool_call_id) > "
             f"('{sql_literal(after_session_id)}', '{sql_literal(after_tool_call_id)}')"
         )
     tools = ", ".join(f"'{tool}'" for tool in RELEVANT_TOOLS)
-    return f"""WITH selected_tool_calls AS (
-    SELECT tr.session_id, tr.tool_call_id, lower(tr.name) AS tool_name,
-           tr.arguments_json
-    FROM tool_requests tr
-    WHERE tr.session_id IN ({ids})
-      AND lower(tr.name) IN ({tools}){cursor}
-    ORDER BY tr.session_id, tr.tool_call_id
-    LIMIT {limit + 1}
-),
-completion_events AS (
-    SELECT session_id, tool_complete_call_id, exit_code, completed_at
-    FROM (
-        SELECT e.session_id, e.tool_complete_call_id,
-               try_cast(
-                   nullif(
-                       regexp_extract(
-                           lower(COALESCE(e.tool_complete_result_content, '')),
-                           '(?:exited|completed) with exit code ([0-9]+)',
-                           1
-                       ),
-                       ''
-                   )
-                   AS INTEGER
-               ) AS exit_code,
-               e.timestamp AS completed_at,
-               row_number() OVER (
-                   PARTITION BY e.session_id, e.tool_complete_call_id
-                   ORDER BY e.timestamp DESC
-               ) AS completion_rank
-        FROM events e
-        JOIN selected_tool_calls tr
-          ON tr.session_id = e.session_id
-         AND tr.tool_call_id = e.tool_complete_call_id
-        WHERE e.timestamp >= TIMESTAMP '{sql_literal(start)}'
-          AND e.timestamp < TIMESTAMP '{sql_literal(end)}'
-          AND e.type = 'tool.execution_complete'
-    )
-    WHERE completion_rank = 1
-)
-SELECT tr.session_id, tr.tool_call_id, tr.tool_name, tr.arguments_json,
-       ce.exit_code, ce.completed_at
-FROM selected_tool_calls tr
-LEFT JOIN completion_events ce
-  ON ce.session_id = tr.session_id
- AND ce.tool_complete_call_id = tr.tool_call_id
-ORDER BY tr.session_id, tr.tool_call_id"""
+    return f"""SELECT tr.session_id, tr.tool_call_id, lower(tr.name) AS tool_name,
+       tr.arguments_json, NULL AS exit_code, NULL AS completed_at
+FROM tool_requests tr
+WHERE tr.session_id IN ({ids})
+  AND lower(tr.name) IN ({tools}){cursor}
+ORDER BY tr.session_id, tr.tool_call_id
+LIMIT {limit + 1}"""
 
 
 def build_event_tool_calls_query(

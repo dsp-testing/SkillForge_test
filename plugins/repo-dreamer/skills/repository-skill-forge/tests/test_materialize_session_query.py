@@ -42,7 +42,7 @@ DERIVER_SPEC.loader.exec_module(deriver)
 
 
 class MaterializeSessionQueryTests(unittest.TestCase):
-    def test_primary_tool_query_uses_only_minimal_completion_events(self) -> None:
+    def test_primary_tool_query_uses_only_tool_requests(self) -> None:
         query = build_tool_calls_query(
             session_ids=["session-1"],
             start="2026-08-01T00:00:00Z",
@@ -50,12 +50,53 @@ class MaterializeSessionQueryTests(unittest.TestCase):
             limit=500,
         )
 
-        self.assertEqual(1, query.count("FROM events"))
+        self.assertNotIn("FROM events", query)
+        self.assertNotIn("JOIN", query)
         self.assertNotIn("tool.execution_start", query)
         self.assertNotIn("tool_complete_success", query)
         self.assertNotIn(" AS result_content", query)
-        self.assertIn("AS exit_code", query)
+        self.assertIn("NULL AS exit_code", query)
+        self.assertIn("NULL AS completed_at", query)
         self.assertIn("FROM tool_requests tr", query)
+        self.assertIn("LIMIT 501", query)
+
+    def test_missing_tool_completion_uses_session_timestamp_and_unknown_outcome(
+        self,
+    ) -> None:
+        normalized = normalizer.normalize_batched_rows(
+            [
+                {
+                    "session_id": "session-1",
+                    "agent_name": "Copilot CLI",
+                    "repository": "owner/repository",
+                    "branch": "main",
+                    "created_at": "2026-08-01T00:00:00Z",
+                    "updated_at": "2026-08-01T00:01:00Z",
+                }
+            ],
+            [],
+            [],
+            [
+                {
+                    "session_id": "session-1",
+                    "tool_call_id": "call-1",
+                    "tool_name": "bash",
+                    "arguments_json": '{"command":"echo hello"}',
+                    "exit_code": None,
+                    "completed_at": None,
+                }
+            ],
+            repository="owner/repository",
+            window_start="2026-08-01T00:00:00Z",
+            window_end="2026-08-02T00:00:00Z",
+            limit_sessions=500,
+        )
+
+        primitive = deriver.derive(normalized)["primitives"][0]
+
+        self.assertEqual("2026-08-01T00:01:00Z", primitive["completedAt"])
+        self.assertEqual("unknown", primitive["outcome"])
+        self.assertIsNone(primitive["exitCode"])
 
     def test_materializes_spilled_tool_rows_with_pipes_and_newlines(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
