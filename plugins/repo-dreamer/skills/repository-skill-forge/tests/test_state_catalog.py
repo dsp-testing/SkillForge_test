@@ -58,6 +58,90 @@ def observation(fingerprint: str) -> dict[str, object]:
 
 
 class FingerprintCatalogTests(unittest.TestCase):
+    def test_all_unknown_outcomes_can_use_corroboration_gates(self) -> None:
+        evidence = [
+            {
+                "evidenceKey": f"evidence-{index}",
+                "fingerprint": "fingerprint-1",
+                "sessionHash": f"session-{index}",
+                "completedAt": f"2026-08-{13 + index % 2:02d}T00:00:00Z",
+                "day": f"2026-08-{13 + index % 2:02d}",
+                "outcome": "unknown",
+                "surface": "cli",
+                "kind": "command",
+                "branchHash": "main",
+                "branchCategory": "default",
+                "pathFamilies": ["scripts"],
+                "refs": [],
+                "signature": {"tokens": ["test"]},
+            }
+            for index in range(3)
+        ]
+        thresholds = {
+            "minDistinctSessions": 3,
+            "minDistinctDays": 2,
+            "minKnownOutcomes": 3,
+            "minSuccessRate": 0.7,
+            "minScoredCoverage": 0.5,
+            "allowUnknownOutcomes": True,
+            "minMergedPrs": 2,
+            "minMainlineEvidence": 2,
+        }
+
+        patterns = aggregate.aggregate(
+            evidence,
+            as_of="2026-08-15T00:00:00Z",
+            active_days=90,
+            stale_days=180,
+            merged_prs=set(),
+            thresholds=thresholds,
+        )
+
+        self.assertTrue(patterns[0]["promotion"]["eligible"])
+        self.assertEqual([], patterns[0]["promotion"]["holdReasons"])
+
+    def test_known_failures_still_apply_outcome_gates(self) -> None:
+        evidence = [
+            {
+                "evidenceKey": f"evidence-{index}",
+                "fingerprint": "fingerprint-1",
+                "sessionHash": f"session-{index}",
+                "completedAt": f"2026-08-{13 + index % 2:02d}T00:00:00Z",
+                "day": f"2026-08-{13 + index % 2:02d}",
+                "outcome": "failure",
+                "surface": "cli",
+                "kind": "command",
+                "branchHash": "main",
+                "branchCategory": "default",
+                "pathFamilies": ["scripts"],
+                "refs": [],
+                "signature": {"tokens": ["test"]},
+            }
+            for index in range(3)
+        ]
+        thresholds = {
+            "minDistinctSessions": 3,
+            "minDistinctDays": 2,
+            "minKnownOutcomes": 3,
+            "minSuccessRate": 0.7,
+            "minScoredCoverage": 0.5,
+            "allowUnknownOutcomes": True,
+            "minMergedPrs": 2,
+            "minMainlineEvidence": 2,
+        }
+
+        pattern = aggregate.aggregate(
+            evidence,
+            as_of="2026-08-15T00:00:00Z",
+            active_days=90,
+            stale_days=180,
+            merged_prs=set(),
+            thresholds=thresholds,
+        )[0]
+
+        self.assertFalse(pattern["promotion"]["eligible"])
+        self.assertIn("low_success_rate", pattern["promotion"]["holdReasons"])
+
     def test_legacy_state_migrates_with_empty_catalog(self) -> None:
         body = (
             "repository-skill-forge-state:v2:begin\n"

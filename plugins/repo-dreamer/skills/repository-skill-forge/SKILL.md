@@ -328,12 +328,17 @@ catalog on their next parse and render.
 
 Run `aggregate-primitives.py` with the parsed issue state. It deduplicates the
 overlap, expires stale observations, preserves the proposal queue/history, and
-writes schema-version-2 state.
+writes schema-version-2 state. While primary tool extraction intentionally
+returns no completion outcomes, pass `--allow-unknown-outcomes`. This bypasses
+outcome thresholds only for patterns with zero known outcomes; if any explicit
+success or failure evidence exists, the normal outcome gates still apply.
 
 Eligibility remains at least three distinct sessions, two distinct days, three
 known outcomes, 0.7 success, 0.5 scored coverage, and either two merged PRs or
-two mainline-corroborated observations. Partial coverage does not change these
-thresholds and must remain visible.
+two mainline-corroborated observations. The temporary unknown-outcome mode
+waives the three outcome requirements only when all outcomes are unavailable.
+Partial coverage does not change the remaining thresholds and must remain
+visible.
 
 ### 7. Author, review, and queue proposals
 
