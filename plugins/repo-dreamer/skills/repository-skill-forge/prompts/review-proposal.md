@@ -35,7 +35,6 @@ Reject or revise the proposal when it:
 - requires `gh` or independently authenticated GitHub access in Dreaming;
 - claims multi-user evidence when trusted user identity is unavailable.
 - assumes more than one proposal PR can be created or updated in a run;
-- omits the required `skills-forge` label;
 - omits, duplicates, corrupts, or mismatches the Forge proposal marker;
 - describes partial extraction as complete or omits coverage and omission
   disclosure from a proposal published after a partial run.
