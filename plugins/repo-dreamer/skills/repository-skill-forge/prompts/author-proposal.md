@@ -21,6 +21,9 @@ proposal manifest's `candidateIds` array.
 Set `proposalVersion` from the complete proposal, including the sorted candidate
 IDs and versions plus the generated skill content, so materially changed
 evidence or instructions produce a new version.
+The pull request body must contain the exact machine-readable marker generated
+by `proposal-ledger.py marker`. Keep that marker unchanged for the lifetime of
+the PR; it is the stateless workflow's cross-run identity and rejection memory.
 
 Copy the extraction coverage into the proposal manifest. Use
 `extraction.status: complete` for complete runs. For partial runs include
@@ -40,8 +43,8 @@ For a promoted proposal:
 - include the required C/R/pi/T sections accepted by `validate-skill.py`;
 - cite candidate IDs and repository artifacts in the proposal summary, not in
   generated instructions where they would distract future execution;
-- assign a deterministic non-negative queue `rank`;
-- keep unrelated subjects as separate queue entries;
+- assign a deterministic non-negative `rank`;
+- keep unrelated subjects as separate proposals;
 - do not modify the target checkout or publish the proposal.
 
 For a hold decision, write no `SKILL.md` and state the exact missing evidence or

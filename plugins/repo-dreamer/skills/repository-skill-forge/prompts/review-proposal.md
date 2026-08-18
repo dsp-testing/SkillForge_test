@@ -7,7 +7,9 @@ evidence, and default-branch repository behavior.
 
 Also compare it with existing repository skills and all matching Forge pull
 requests: open drafts, open ready-for-review PRs, closed-unmerged PRs, and
-merged PRs. Reject duplicate or overlapping proposals.
+merged PRs. Reject duplicate or overlapping proposals. Confirm that the PR body
+contains exactly one valid `repository-skill-forge-proposal:v1` marker whose
+key, version, candidate IDs, and decision match the reviewed proposal.
 
 Return JSON with:
 
@@ -34,6 +36,7 @@ Reject or revise the proposal when it:
 - claims multi-user evidence when trusted user identity is unavailable.
 - assumes more than one proposal PR can be created or updated in a run;
 - omits the required `skills-forge` label;
+- omits, duplicates, corrupts, or mismatches the Forge proposal marker;
 - describes partial extraction as complete or omits coverage and omission
   disclosure from a proposal published after a partial run.
 
