@@ -62,6 +62,39 @@ def write_rows(path: str, rows: list[dict[str, object]]) -> None:
 
 
 class ExtractionControllerTests(unittest.TestCase):
+    def test_cli_defaults_to_twenty_five_session_batches(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state_path = Path(run_dir) / "state.json"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS_DIR / "extraction-controller.py"),
+                    "init",
+                    "--out",
+                    str(state_path),
+                    "--repository",
+                    "owner/repository",
+                    "--start",
+                    "2026-08-01T00:00:00Z",
+                    "--end",
+                    "2026-08-08T00:00:00Z",
+                    "--run-dir",
+                    run_dir,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+            self.assertEqual(
+                25,
+                json.loads(state_path.read_text(encoding="utf-8"))["limits"][
+                    "sessionBatchSize"
+                ],
+            )
+
     def test_discovery_uses_ordered_keyset_query(self) -> None:
         query = build_discovery_query(
             repository="owner/repository",

@@ -31,7 +31,7 @@ Inputs:
 - `initialBackfillDays`: default `7`;
 - `overlapHours`: default `24`;
 - `discoveryPageSize`: default `100`;
-- `sessionBatchSize`: default `100`;
+- `sessionBatchSize`: default `25`;
 - `toolPageSize`: default `500`;
 - `maxRows`: default `1000`;
 - `maxArtifactBytes`: default `10000000`;
@@ -128,6 +128,9 @@ strategy is:
 
 Tool requests are selected by exact session ID. A session created before the
 incremental window but updated inside it must not be excluded.
+Keep `sessionBatchSize` at 25 unless a measured deployment limit requires a
+smaller value. Do not increase it merely to reduce query count: long exact-ID
+SQL is more likely to time out or be altered while passed to the query tool.
 The materialized `sessions.updated_at` value is the timestamp of the session's
 latest event and is the workflow's completion-time proxy. Sessions are
 resumable, so the workflow does not require a separate `completed_at` value.

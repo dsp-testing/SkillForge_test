@@ -1117,7 +1117,7 @@ def main() -> None:
     init.add_argument("--end", required=True)
     init.add_argument("--run-dir", required=True)
     init.add_argument("--discovery-page-size", type=int, default=100)
-    init.add_argument("--session-batch-size", type=int, default=100)
+    init.add_argument("--session-batch-size", type=int, default=25)
     init.add_argument("--tool-page-size", type=int, default=500)
     init.add_argument("--max-rows", type=int, default=1000)
     init.add_argument("--max-artifact-bytes", type=int, default=10_000_000)
