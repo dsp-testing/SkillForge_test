@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,23 @@ DETAILED_SQL_RE = re.compile(
     r"^SQL \(session_store(?:/[^)]*)?\): (.*)$",
     re.DOTALL,
 )
+
+
+def normalize_sql(sql: str) -> str:
+    return " ".join(sql.split())
+
+
+def read_events(path: Path) -> Iterator[dict[str, Any]]:
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                yield event
 
 
 def load_action(path: str, action_id: str) -> dict[str, Any]:
@@ -48,55 +66,85 @@ def result_content(
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
+    normalized_sql = normalize_sql(sql)
+    exact_call_ids: set[str] = set()
+    normalized_call_ids: set[str] = set()
     for event_file in event_files:
-        matches: list[tuple[bool | None, dict[str, Any]]] = []
-        matching_call_ids: set[str] = set()
-        with event_file.open(encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                data = event.get("data")
-                if not isinstance(data, dict):
-                    continue
-                if event.get("type") == "tool.execution_start":
-                    arguments = data.get("arguments")
-                    call_id = data.get("toolCallId")
-                    if (
-                        data.get("toolName") == "session_store_sql"
-                        and isinstance(arguments, dict)
-                        and arguments.get("query") == sql
-                        and isinstance(call_id, str)
-                    ):
-                        matching_call_ids.add(call_id)
-                    continue
-                if event.get("type") != "tool.execution_complete":
-                    continue
-                result = data.get("result")
-                if not isinstance(result, dict):
-                    continue
-                call_id = data.get("toolCallId")
-                if isinstance(call_id, str) and call_id in matching_call_ids:
-                    matches.append((data.get("success"), result))
-                    continue
-                detailed = result.get("detailedContent")
-                sql_match = (
-                    DETAILED_SQL_RE.fullmatch(detailed)
-                    if isinstance(detailed, str)
-                    else None
+        for event in read_events(event_file):
+            if event.get("type") != "tool.execution_start":
+                continue
+            data = event.get("data")
+            if not isinstance(data, dict):
+                continue
+            arguments = data.get("arguments")
+            call_id = data.get("toolCallId")
+            if (
+                data.get("toolName") == "session_store_sql"
+                and isinstance(arguments, dict)
+                and isinstance(arguments.get("query"), str)
+                and isinstance(call_id, str)
+            ):
+                query = arguments["query"]
+                if query == sql:
+                    exact_call_ids.add(call_id)
+                elif normalize_sql(query) == normalized_sql:
+                    normalized_call_ids.add(call_id)
+
+    matching_call_ids = exact_call_ids or normalized_call_ids
+    match_groups: list[
+        list[tuple[int, int, bool | None, dict[str, Any]]]
+    ] = [[], [], []]
+    for file_index, event_file in enumerate(event_files):
+        for event_index, event in enumerate(read_events(event_file)):
+            if event.get("type") != "tool.execution_complete":
+                continue
+            data = event.get("data")
+            if not isinstance(data, dict):
+                continue
+            result = data.get("result")
+            if not isinstance(result, dict):
+                continue
+            call_id = data.get("toolCallId")
+            if isinstance(call_id, str) and call_id in matching_call_ids:
+                match_groups[0].append(
+                    (file_index, event_index, data.get("success"), result)
                 )
-                detailed_payload = sql_match.group(1) if sql_match else None
-                if detailed_payload == sql or (
-                    isinstance(detailed_payload, str)
-                    and detailed_payload.startswith(f"{sql}\n\n")
-                ):
-                    matches.append((data.get("success"), result))
-        if not matches:
-            continue
-        success, result = matches[-1]
+                continue
+            detailed = result.get("detailedContent")
+            sql_match = (
+                DETAILED_SQL_RE.fullmatch(detailed)
+                if isinstance(detailed, str)
+                else None
+            )
+            detailed_payload = sql_match.group(1) if sql_match else None
+            rendered_sql = (
+                detailed_payload.split("\n\n", 1)[0]
+                if isinstance(detailed_payload, str)
+                else None
+            )
+            if rendered_sql == sql:
+                match_groups[1].append(
+                    (file_index, event_index, data.get("success"), result)
+                )
+            elif (
+                isinstance(rendered_sql, str)
+                and normalize_sql(rendered_sql) == normalized_sql
+            ):
+                match_groups[2].append(
+                    (file_index, event_index, data.get("success"), result)
+                )
+
+    selected: tuple[bool | None, dict[str, Any]] | None = None
+    for matches in match_groups:
+        if matches:
+            _, _, success, result = max(
+                matches,
+                key=lambda match: (-match[0], match[1]),
+            )
+            selected = success, result
+            break
+    if selected is not None:
+        success, result = selected
         if success is not True:
             raise ValueError(
                 "matching session_store_sql call was not explicitly successful"

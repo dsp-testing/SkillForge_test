@@ -269,6 +269,217 @@ class MaterializeSessionQueryTests(unittest.TestCase):
 
             self.assertEqual(content, materializer.result_content(events_root, sql))
 
+    def test_matches_whitespace_normalized_sql(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            events_root = Path(temporary)
+            event_dir = events_root / "session-1"
+            event_dir.mkdir()
+            sql = "SELECT session_id,\n       updated_at\nFROM sessions"
+            content = "Query returned 0 rows."
+            events = [
+                {
+                    "type": "tool.execution_start",
+                    "data": {
+                        "toolCallId": "call-1",
+                        "toolName": "session_store_sql",
+                        "arguments": {
+                            "query": "SELECT session_id, updated_at FROM sessions",
+                        },
+                    },
+                },
+                {
+                    "type": "tool.execution_complete",
+                    "data": {
+                        "toolCallId": "call-1",
+                        "success": True,
+                        "result": {
+                            "content": content,
+                            "detailedContent": "SQL result omitted",
+                        },
+                    },
+                },
+            ]
+            (event_dir / "events.jsonl").write_text(
+                "".join(json.dumps(event) + "\n" for event in events),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(content, materializer.result_content(events_root, sql))
+
+    def test_prefers_exact_start_sql_over_normalized_match(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            events_root = Path(temporary)
+            event_dir = events_root / "session-1"
+            event_dir.mkdir()
+            sql = "SELECT session_id,\n       updated_at\nFROM sessions"
+            events = [
+                {
+                    "type": "tool.execution_start",
+                    "data": {
+                        "toolCallId": "normalized-call",
+                        "toolName": "session_store_sql",
+                        "arguments": {
+                            "query": "SELECT session_id, updated_at FROM sessions",
+                        },
+                    },
+                },
+                {
+                    "type": "tool.execution_complete",
+                    "data": {
+                        "toolCallId": "normalized-call",
+                        "success": True,
+                        "result": {
+                            "content": "normalized result",
+                            "detailedContent": "SQL omitted",
+                        },
+                    },
+                },
+                {
+                    "type": "tool.execution_start",
+                    "data": {
+                        "toolCallId": "exact-call",
+                        "toolName": "session_store_sql",
+                        "arguments": {"query": sql},
+                    },
+                },
+                {
+                    "type": "tool.execution_complete",
+                    "data": {
+                        "toolCallId": "exact-call",
+                        "success": True,
+                        "result": {
+                            "content": "exact result",
+                            "detailedContent": "SQL omitted",
+                        },
+                    },
+                },
+            ]
+            (event_dir / "events.jsonl").write_text(
+                "".join(json.dumps(event) + "\n" for event in events),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                "exact result",
+                materializer.result_content(events_root, sql),
+            )
+
+    def test_links_start_and_completion_across_event_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            events_root = Path(temporary)
+            start_dir = events_root / "session-start"
+            completion_dir = events_root / "session-completion"
+            start_dir.mkdir()
+            completion_dir.mkdir()
+            sql = "SELECT id AS session_id FROM sessions"
+            content = "Query returned 0 rows."
+            (start_dir / "events.jsonl").write_text(
+                json.dumps(
+                    {
+                        "type": "tool.execution_start",
+                        "data": {
+                            "toolCallId": "call-1",
+                            "toolName": "session_store_sql",
+                            "arguments": {"query": sql},
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (completion_dir / "events.jsonl").write_text(
+                json.dumps(
+                    {
+                        "type": "tool.execution_complete",
+                        "data": {
+                            "toolCallId": "call-1",
+                            "success": True,
+                            "result": {
+                                "content": content,
+                                "detailedContent": "SQL omitted",
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(content, materializer.result_content(events_root, sql))
+
+    def test_matches_whitespace_normalized_detailed_sql(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            events_root = Path(temporary)
+            event_dir = events_root / "session-1"
+            event_dir.mkdir()
+            sql = "SELECT session_id,\n       updated_at\nFROM sessions"
+            content = "Query returned 0 rows."
+            event = {
+                "type": "tool.execution_complete",
+                "data": {
+                    "success": True,
+                    "result": {
+                        "content": content,
+                        "detailedContent": (
+                            "SQL (session_store/repo/owner/repository): "
+                            "SELECT session_id, updated_at FROM sessions"
+                            f"\n\n{content}"
+                        ),
+                    },
+                },
+            }
+            (event_dir / "events.jsonl").write_text(
+                json.dumps(event) + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(content, materializer.result_content(events_root, sql))
+
+    def test_prefers_exact_detailed_sql_over_normalized_match(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            events_root = Path(temporary)
+            event_dir = events_root / "session-1"
+            event_dir.mkdir()
+            sql = "SELECT session_id,\n       updated_at\nFROM sessions"
+            events = [
+                {
+                    "type": "tool.execution_complete",
+                    "data": {
+                        "success": True,
+                        "result": {
+                            "content": "exact result",
+                            "detailedContent": (
+                                "SQL (session_store/repo/owner/repository): "
+                                f"{sql}\n\nexact result"
+                            ),
+                        },
+                    },
+                },
+                {
+                    "type": "tool.execution_complete",
+                    "data": {
+                        "success": True,
+                        "result": {
+                            "content": "normalized result",
+                            "detailedContent": (
+                                "SQL (session_store/repo/owner/repository): "
+                                "SELECT session_id, updated_at FROM sessions"
+                                "\n\nnormalized result"
+                            ),
+                        },
+                    },
+                },
+            ]
+            (event_dir / "events.jsonl").write_text(
+                "".join(json.dumps(event) + "\n" for event in events),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                "exact result",
+                materializer.result_content(events_root, sql),
+            )
+
     def test_skips_malformed_event_log_lines_before_a_match(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             events_root = Path(temporary)
