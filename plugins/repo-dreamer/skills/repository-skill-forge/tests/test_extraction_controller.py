@@ -16,7 +16,7 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = SKILL_DIR / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from session_queries import build_discovery_query
+from session_queries import build_discovery_query, build_files_query
 
 CONTROLLER_SPEC = importlib.util.spec_from_file_location(
     "extraction_controller",
@@ -132,6 +132,118 @@ class ExtractionControllerTests(unittest.TestCase):
                     "sessionBatchSize"
                 ],
             )
+
+    def test_assert_terminal_rejects_running_state(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state_path = Path(run_dir) / "state.json"
+            state = controller.initialize(arguments(run_dir))
+            action = controller.next_action(state)
+            assert action is not None
+            controller.write_json(str(state_path), state)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS_DIR / "extraction-controller.py"),
+                    "assert-terminal",
+                    "--state",
+                    str(state_path),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("status is running", result.stderr)
+            self.assertIn(action["actionId"], result.stderr)
+
+    def test_assert_terminal_accepts_complete_state(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state_path = Path(run_dir) / "state.json"
+            state = controller.initialize(arguments(run_dir))
+            state["status"] = "complete"
+            state["coverage"] = 1.0
+            controller.write_json(str(state_path), state)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS_DIR / "extraction-controller.py"),
+                    "assert-terminal",
+                    "--state",
+                    str(state_path),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+            self.assertEqual(
+                {
+                    "kind": "terminal",
+                    "status": "complete",
+                    "terminal": True,
+                    "coverage": 1.0,
+                },
+                json.loads(result.stdout),
+            )
+
+    def test_parallel_action_manifest_is_explicitly_nonterminal(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state_path = Path(run_dir) / "state.json"
+            actions_path = Path(run_dir) / "actions.json"
+            controller.write_json(
+                str(state_path),
+                controller.initialize(arguments(run_dir)),
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS_DIR / "extraction-controller.py"),
+                    "next",
+                    "--state",
+                    str(state_path),
+                    "--parallel",
+                    "--out",
+                    str(actions_path),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+            manifest = json.loads(actions_path.read_text(encoding="utf-8"))
+            self.assertEqual("action-batch", manifest["kind"])
+            self.assertEqual("running", manifest["status"])
+            self.assertFalse(manifest["terminal"])
+
+    def test_file_query_deduplicates_before_pagination(self) -> None:
+        query = build_files_query(
+            session_ids=["session-1"],
+            start="2026-08-01T00:00:00Z",
+            end="2026-08-08T00:00:00Z",
+            limit=500,
+            cursor={
+                "sessionId": "session-1",
+                "filePath": "src/example.py",
+                "toolName": "edit",
+            },
+        )
+
+        self.assertIn("min(turn_index) AS turn_index", query)
+        self.assertIn("GROUP BY session_id, file_path, tool_name", query)
+        self.assertIn(
+            "WHERE (session_id, file_path, tool_name) > "
+            "('session-1', 'src/example.py', 'edit')",
+            query,
+        )
+        self.assertIn("ORDER BY session_id, file_path, tool_name", query)
 
     def test_discovery_uses_ordered_keyset_query(self) -> None:
         query = build_discovery_query(

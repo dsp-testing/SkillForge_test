@@ -202,6 +202,36 @@ def finalize_extraction(state: dict[str, Any]) -> None:
     state["status"] = "partial" if state["omittedUnits"] else "complete"
 
 
+def terminal_summary(state: dict[str, Any]) -> dict[str, Any]:
+    validate_state_invariants(state)
+    status = str(state.get("status"))
+    if status == "running":
+        pending = [
+            str(action.get("actionId"))
+            for action in state.get("issuedActions", [])
+            if action.get("actionId")
+        ]
+        detail = f"; pending actions: {', '.join(pending)}" if pending else ""
+        raise ValueError(
+            "extraction is not terminal: status is running"
+            f"{detail}; continue invoking next and recording every outcome"
+        )
+    if status not in {"complete", "partial", "blocked"}:
+        raise ValueError(f"extraction has unsupported terminal status: {status}")
+    summary: dict[str, Any] = {
+        "kind": "terminal",
+        "status": status,
+        "terminal": True,
+    }
+    if state.get("coverage") is not None:
+        summary["coverage"] = state["coverage"]
+    if status == "partial":
+        summary["omittedUnits"] = state["omittedUnits"]
+    if status == "blocked":
+        summary["blocker"] = state["blockers"][-1]
+    return summary
+
+
 def next_actions(
     state: dict[str, Any],
     max_actions: int,
@@ -604,7 +634,6 @@ def record_success(
         elif action["kind"] == "files":
             batch["filesCursor"] = {
                 "sessionId": last["session_id"],
-                "turnIndex": last["turn_index"],
                 "filePath": last["file_path"],
                 "toolName": last["tool_name"],
             }
@@ -1142,6 +1171,10 @@ def main() -> None:
     next_parser.add_argument("--out")
     next_parser.add_argument("--parallel", action="store_true")
 
+    terminal = subparsers.add_parser("assert-terminal")
+    terminal.add_argument("--state", required=True)
+    terminal.add_argument("--out")
+
     success = subparsers.add_parser("record-success")
     success.add_argument("--state", required=True)
     success.add_argument("--action", required=True)
@@ -1193,7 +1226,11 @@ def main() -> None:
             )
             actions = next_actions(state, max_actions)
             write_json(args.state, state)
-            done = {"kind": "done", "status": state["status"]}
+            done = {
+                "kind": "done",
+                "status": state["status"],
+                "terminal": True,
+            }
             if state["status"] == "blocked":
                 done["blocker"] = state["blockers"][-1]
             if state["coverage"] is not None:
@@ -1201,13 +1238,25 @@ def main() -> None:
             if state["status"] == "partial":
                 done["omittedUnits"] = state["omittedUnits"]
             if args.parallel and actions:
-                payload = {"kind": "action-batch", "actions": actions}
+                payload = {
+                    "kind": "action-batch",
+                    "status": state["status"],
+                    "terminal": False,
+                    "actions": actions,
+                }
             else:
                 payload = actions[0] if actions else done
             if args.out:
                 write_json(args.out, payload)
             else:
                 print(json.dumps(payload, indent=2))
+            return
+        if args.command == "assert-terminal":
+            summary = terminal_summary(state)
+            if args.out:
+                write_json(args.out, summary)
+            else:
+                print(json.dumps(summary, indent=2))
             return
         action = load_action(args.action, state)
         if args.command == "record-success":

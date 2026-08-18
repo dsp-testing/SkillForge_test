@@ -111,16 +111,22 @@ def build_files_query(
     after = ""
     if cursor:
         after = (
-            "\n  AND (session_id, turn_index, file_path, tool_name) > "
-            f"('{sql_literal(str(cursor['sessionId']))}', {int(cursor['turnIndex'])}, "
-            f"'{sql_literal(str(cursor['filePath']))}', '{sql_literal(str(cursor['toolName']))}')"
+            "\nWHERE (session_id, file_path, tool_name) > "
+            f"('{sql_literal(str(cursor['sessionId']))}', "
+            f"'{sql_literal(str(cursor['filePath']))}', "
+            f"'{sql_literal(str(cursor['toolName']))}')"
         )
-    return f"""SELECT session_id, file_path, tool_name, turn_index
-FROM session_files
-WHERE first_seen_at >= TIMESTAMP '{sql_literal(start)}'
-  AND first_seen_at < TIMESTAMP '{sql_literal(end)}'
-  AND session_id IN ({ids}){after}
-ORDER BY session_id, turn_index, file_path, tool_name
+    return f"""WITH selected_files AS (
+    SELECT session_id, file_path, tool_name, min(turn_index) AS turn_index
+    FROM session_files
+    WHERE first_seen_at >= TIMESTAMP '{sql_literal(start)}'
+      AND first_seen_at < TIMESTAMP '{sql_literal(end)}'
+      AND session_id IN ({ids})
+    GROUP BY session_id, file_path, tool_name
+)
+SELECT session_id, file_path, tool_name, turn_index
+FROM selected_files{after}
+ORDER BY session_id, file_path, tool_name
 LIMIT {limit + 1}"""
 
 

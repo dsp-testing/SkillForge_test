@@ -342,6 +342,60 @@ class MaterializeSessionQueryTests(unittest.TestCase):
                 materializer.result_content(events_root, sql, "discovery-1"),
             )
 
+    def test_matches_punctuation_spacing_normalized_sql(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            events_root = Path(temporary)
+            event_dir = events_root / "session-1"
+            event_dir.mkdir()
+            sql = (
+                "SELECT session_id, tool_call_id FROM tool_requests "
+                "WHERE session_id IN ('one', 'two') AND name = 'bash'"
+            )
+            submitted = (
+                "SELECT session_id,tool_call_id FROM tool_requests "
+                "WHERE session_id IN('one','two') AND name='bash'"
+            )
+            content = "Query returned 0 rows."
+            events = [
+                {
+                    "type": "tool.execution_start",
+                    "data": {
+                        "toolCallId": "call-1",
+                        "toolName": "session_store_sql",
+                        "arguments": {
+                            "description": "tools-batch-1",
+                            "query": submitted,
+                        },
+                    },
+                },
+                {
+                    "type": "tool.execution_complete",
+                    "data": {
+                        "toolCallId": "call-1",
+                        "success": True,
+                        "result": {
+                            "content": content,
+                            "detailedContent": "SQL result omitted",
+                        },
+                    },
+                },
+            ]
+            (event_dir / "events.jsonl").write_text(
+                "".join(json.dumps(event) + "\n" for event in events),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                content,
+                materializer.result_content(events_root, sql, "tools-batch-1"),
+            )
+
+    def test_sql_normalization_preserves_literal_contents(self) -> None:
+        self.assertNotEqual(
+            materializer.normalize_sql("SELECT 'one two'"),
+            materializer.normalize_sql("SELECT 'onetwo'"),
+        )
+
     def test_ignores_matching_description_from_other_tools(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             events_root = Path(temporary)
