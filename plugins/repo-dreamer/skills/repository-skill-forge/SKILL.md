@@ -104,9 +104,9 @@ modifying the issue body again; do not replace it with a blocked-run note.
 
 When the cursor is null, set `windowStart = windowEnd - 7 days`. Otherwise use
 `windowStart = cursor - 24 hours`. Deduplicate the overlap by stable
-`evidenceKey`. Read default-branch repository content through GitHub MCP, but
-do not require the exact branch name or commit SHA before extraction, candidate
-generation, or a no-publication decision.
+`evidenceKey`. Read default-branch repository content through GitHub MCP by
+omitting the optional `ref`; do not require the exact branch name or commit SHA
+before extraction, candidate generation, or a no-publication decision.
 
 Do not advance the issue cursor until extraction, validation, reconciliation,
 the selected publication outcome, and the issue update all succeed.
@@ -310,11 +310,19 @@ without making a network request:
 
 ```bash
 REPOSITORY_DIR="$(git rev-parse --show-toplevel)"
-DEFAULT_REF="$(
+if ! DEFAULT_REF="$(
   git -C "$REPOSITORY_DIR" symbolic-ref --quiet refs/remotes/origin/HEAD
-)"
+)"; then
+  echo "local checkout has no origin/HEAD default-branch ref" >&2
+  exit 1
+fi
 TARGET_BRANCH="${DEFAULT_REF#refs/remotes/origin/}"
-TARGET_SHA="$(git -C "$REPOSITORY_DIR" rev-parse "$DEFAULT_REF^{commit}")"
+if ! TARGET_SHA="$(
+  git -C "$REPOSITORY_DIR" rev-parse --verify "$DEFAULT_REF^{commit}"
+)"; then
+  echo "local default-branch ref does not resolve to a commit" >&2
+  exit 1
+fi
 ```
 
 If no proposal is selected, exact target identity is unnecessary and its
