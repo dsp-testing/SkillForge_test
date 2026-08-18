@@ -21,8 +21,16 @@ TOKEN_PATTERNS = (
     (
         "assigned_secret",
         re.compile(
-            r"\b(?:password|passwd|token|secret|api[_-]?key)\s*[:=]\s*['\"]?(?!<|\$\{|\$[A-Z_]+)[^\s'\"]{12,}",
-            re.IGNORECASE,
+            r"""
+            \b(?:password|passwd|token|secret|api[_-]?key)\s*[:=]\s*
+            (?:
+                (?P<quote>['"])(?!<|\$\{|\$[A-Z_]+)[^'"\r\n]{12,}(?P=quote)
+                |
+                (?!<|\$\{|\$[A-Z_]+)
+                [A-Za-z0-9._~+/=-]{12,}(?![A-Za-z0-9._~+/=\-\[(])
+            )
+            """,
+            re.IGNORECASE | re.VERBOSE,
         ),
     ),
 )
