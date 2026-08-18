@@ -155,6 +155,10 @@ With `--fail-on-omission`, any irreducible discovery failure blocks.
 Every query success or failure must be recorded through
 `extraction-controller.py`. Never retry a query manually, alter controller SQL
 ad hoc, or continue after the controller returns a blocked state.
+Pass each action's `description` unchanged to `session_store_sql`; it equals the
+stable `actionId`. Never replace it with ordinal labels such as "first batch"
+or "second batch". Associate the returned rows or error with that same action
+object, and verify the action ID before recording the outcome.
 When `session_store_sql` returns query rows to the agent instead of accepting
 the controller's `outputPath`, use the packaged materializer. It matches the
 exact controller SQL in the current automation session's local `events.jsonl`,
@@ -219,10 +223,12 @@ Discovery manifests contain exactly one action because pages and timeout
 partitions are cursor-dependent. Post-discovery manifests contain up to
 `maxConcurrentBatches` actions from different session batches. Execute those
 queries concurrently, but record each success or failure sequentially through
-the controller using its action ID. Issued actions remain persisted until their
-individual result is recorded, so recording one action cannot invalidate its
-siblings. Record completed successes before failures, and terminal failures
-last, so a blocked action cannot prevent sibling results from being persisted.
+the controller using the action ID carried by that exact tool call. Do not map
+parallel outcomes by completion order. Issued actions remain persisted until
+their individual result is recorded, so recording one action cannot invalidate
+its siblings. Record completed successes before failures, and terminal
+failures last, so a blocked action cannot prevent sibling results from being
+persisted.
 Never execute two actions for the same batch concurrently. The controller is
 the only writer of extraction state.
 

@@ -153,6 +153,7 @@ class ExtractionControllerTests(unittest.TestCase):
             state = controller.initialize(arguments(run_dir))
             discovery = controller.next_action(state)
             assert discovery is not None
+            self.assertEqual(discovery["actionId"], discovery["description"])
             write_rows(
                 discovery["outputPath"],
                 [
@@ -398,6 +399,12 @@ class ExtractionControllerTests(unittest.TestCase):
             self.assertTrue(
                 all(
                     action["kind"] == "tool-calls"
+                    for action in controller.next_actions(state, 3)
+                )
+            )
+            self.assertTrue(
+                all(
+                    action["description"] == action["actionId"]
                     for action in controller.next_actions(state, 3)
                 )
             )
