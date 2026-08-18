@@ -288,12 +288,14 @@ def aggregate(
             reasons.append("insufficient_distinct_sessions")
         if len(days) < thresholds["minDistinctDays"]:
             reasons.append("insufficient_distinct_days")
-        if known < thresholds["minKnownOutcomes"]:
-            reasons.append("insufficient_known_outcomes")
-        if success_rate < thresholds["minSuccessRate"]:
-            reasons.append("low_success_rate")
-        if scored_coverage < thresholds["minScoredCoverage"]:
-            reasons.append("low_scored_outcome_coverage")
+        allow_unknown_outcomes = bool(thresholds.get("allowUnknownOutcomes"))
+        if known > 0 or not allow_unknown_outcomes:
+            if known < thresholds["minKnownOutcomes"]:
+                reasons.append("insufficient_known_outcomes")
+            if success_rate < thresholds["minSuccessRate"]:
+                reasons.append("low_success_rate")
+            if scored_coverage < thresholds["minScoredCoverage"]:
+                reasons.append("low_scored_outcome_coverage")
         if len(merged_refs) < thresholds["minMergedPrs"] and mainline_count < thresholds["minMainlineEvidence"]:
             reasons.append("insufficient_mainline_corroboration")
 
@@ -375,6 +377,7 @@ def main() -> None:
     parser.add_argument("--min-known-outcomes", type=int, default=3)
     parser.add_argument("--min-success-rate", type=float, default=0.7)
     parser.add_argument("--min-scored-coverage", type=float, default=0.5)
+    parser.add_argument("--allow-unknown-outcomes", action="store_true")
     parser.add_argument("--min-merged-prs", type=int, default=2)
     parser.add_argument("--min-mainline-evidence", type=int, default=2)
     args = parser.parse_args()
@@ -399,6 +402,7 @@ def main() -> None:
             "minKnownOutcomes": args.min_known_outcomes,
             "minSuccessRate": args.min_success_rate,
             "minScoredCoverage": args.min_scored_coverage,
+            "allowUnknownOutcomes": args.allow_unknown_outcomes,
             "minMergedPrs": args.min_merged_prs,
             "minMainlineEvidence": args.min_mainline_evidence,
         }
