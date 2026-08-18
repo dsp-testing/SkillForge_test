@@ -1004,6 +1004,27 @@ def record_failure(
     validate_state_invariants(state)
 
 
+def record_artifact_failure(
+    state: dict[str, Any],
+    action: dict[str, Any],
+    reason: str,
+) -> None:
+    if action["actionId"] in state["handledActionIds"]:
+        return
+    release_issued_action(state, action["actionId"])
+    state["blockers"].append(
+        {
+            "actionId": action["actionId"],
+            "kind": action["kind"],
+            "errorKind": "artifact",
+            "reason": reason,
+        }
+    )
+    state["handledActionIds"].append(action["actionId"])
+    state["status"] = "blocked"
+    validate_state_invariants(state)
+
+
 def classify_error(reason: str) -> str:
     normalized = reason.lower()
     if any(token in normalized for token in ("unauthorized", "forbidden", "permission", "access denied")):
@@ -1137,6 +1158,12 @@ def main() -> None:
     )
     failure.add_argument("--out", required=True)
 
+    artifact_failure = subparsers.add_parser("record-artifact-failure")
+    artifact_failure.add_argument("--state", required=True)
+    artifact_failure.add_argument("--action", required=True)
+    artifact_failure.add_argument("--reason", required=True)
+    artifact_failure.add_argument("--out", required=True)
+
     args = parser.parse_args()
     try:
         if args.command == "init":
@@ -1181,6 +1208,8 @@ def main() -> None:
                     count_attempt=False,
                     allow_retry=False,
                 )
+        elif args.command == "record-artifact-failure":
+            record_artifact_failure(state, action, args.reason)
         else:
             record_failure(state, action, args.reason, error_kind=args.error_kind)
         write_json(args.out, state)
