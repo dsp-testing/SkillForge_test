@@ -126,9 +126,9 @@ strategy is:
    repository scope;
 2. fetch exact-ID `sessions` metadata in batches of 100;
 3. fetch bounded `session_refs` and `session_files`;
-4. fetch relevant `tool_requests` directly with pages of 500, then join only
-   their exact IDs to time-bounded completion events for normalized shell exit
-   codes and completion timestamps.
+4. fetch relevant `tool_requests` directly with pages of 500. Keep tool-level
+   `exit_code` and `completed_at` absent until Session Search exposes
+   materialized completion metadata; do not join the primary query to `events`.
 
 Tool requests are selected by exact session ID. A session created before the
 incremental window but updated inside it must not be excluded.
@@ -138,6 +138,9 @@ SQL is more likely to time out or be altered while passed to the query tool.
 The materialized `sessions.updated_at` value is the timestamp of the session's
 latest event and is the workflow's completion-time proxy. Sessions are
 resumable, so the workflow does not require a separate `completed_at` value.
+Primitive derivation uses this session timestamp when a tool-level completion
+timestamp is unavailable. Tool outcomes remain `unknown` when no explicit exit
+code is available; do not infer success from the presence of a tool request.
 
 Do not fetch turns, assistant messages, or unrelated tools. Do not run a
 separate repository-wide count query; discovery is the authoritative inventory,
