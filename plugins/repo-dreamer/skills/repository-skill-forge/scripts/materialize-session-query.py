@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,23 @@ DETAILED_SQL_RE = re.compile(
     r"^SQL \(session_store(?:/[^)]*)?\): (.*)$",
     re.DOTALL,
 )
+
+
+def normalize_sql(sql: str) -> str:
+    return " ".join(sql.split())
+
+
+def read_events(path: Path) -> Iterator[dict[str, Any]]:
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                yield event
 
 
 def load_action(path: str, action_id: str) -> dict[str, Any]:
@@ -48,52 +66,58 @@ def result_content(
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
+    normalized_sql = normalize_sql(sql)
+    matching_call_ids: set[str] = set()
+    for event_file in event_files:
+        for event in read_events(event_file):
+            if event.get("type") != "tool.execution_start":
+                continue
+            data = event.get("data")
+            if not isinstance(data, dict):
+                continue
+            arguments = data.get("arguments")
+            call_id = data.get("toolCallId")
+            if (
+                data.get("toolName") == "session_store_sql"
+                and isinstance(arguments, dict)
+                and isinstance(arguments.get("query"), str)
+                and normalize_sql(arguments["query"]) == normalized_sql
+                and isinstance(call_id, str)
+            ):
+                matching_call_ids.add(call_id)
+
     for event_file in event_files:
         matches: list[tuple[bool | None, dict[str, Any]]] = []
-        matching_call_ids: set[str] = set()
-        with event_file.open(encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                data = event.get("data")
-                if not isinstance(data, dict):
-                    continue
-                if event.get("type") == "tool.execution_start":
-                    arguments = data.get("arguments")
-                    call_id = data.get("toolCallId")
-                    if (
-                        data.get("toolName") == "session_store_sql"
-                        and isinstance(arguments, dict)
-                        and arguments.get("query") == sql
-                        and isinstance(call_id, str)
-                    ):
-                        matching_call_ids.add(call_id)
-                    continue
-                if event.get("type") != "tool.execution_complete":
-                    continue
-                result = data.get("result")
-                if not isinstance(result, dict):
-                    continue
-                call_id = data.get("toolCallId")
-                if isinstance(call_id, str) and call_id in matching_call_ids:
-                    matches.append((data.get("success"), result))
-                    continue
-                detailed = result.get("detailedContent")
-                sql_match = (
-                    DETAILED_SQL_RE.fullmatch(detailed)
-                    if isinstance(detailed, str)
-                    else None
-                )
-                detailed_payload = sql_match.group(1) if sql_match else None
-                if detailed_payload == sql or (
-                    isinstance(detailed_payload, str)
-                    and detailed_payload.startswith(f"{sql}\n\n")
-                ):
-                    matches.append((data.get("success"), result))
+        for event in read_events(event_file):
+            if event.get("type") != "tool.execution_complete":
+                continue
+            data = event.get("data")
+            if not isinstance(data, dict):
+                continue
+            result = data.get("result")
+            if not isinstance(result, dict):
+                continue
+            call_id = data.get("toolCallId")
+            if isinstance(call_id, str) and call_id in matching_call_ids:
+                matches.append((data.get("success"), result))
+                continue
+            detailed = result.get("detailedContent")
+            sql_match = (
+                DETAILED_SQL_RE.fullmatch(detailed)
+                if isinstance(detailed, str)
+                else None
+            )
+            detailed_payload = sql_match.group(1) if sql_match else None
+            rendered_sql = (
+                detailed_payload.split("\n\n", 1)[0]
+                if isinstance(detailed_payload, str)
+                else None
+            )
+            if (
+                isinstance(rendered_sql, str)
+                and normalize_sql(rendered_sql) == normalized_sql
+            ):
+                matches.append((data.get("success"), result))
         if not matches:
             continue
         success, result = matches[-1]
