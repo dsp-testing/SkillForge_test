@@ -289,7 +289,7 @@ def aggregate(
         if len(days) < thresholds["minDistinctDays"]:
             reasons.append("insufficient_distinct_days")
         allow_unknown_outcomes = bool(thresholds.get("allowUnknownOutcomes"))
-        if known or not allow_unknown_outcomes:
+        if known > 0 or not allow_unknown_outcomes:
             if known < thresholds["minKnownOutcomes"]:
                 reasons.append("insufficient_known_outcomes")
             if success_rate < thresholds["minSuccessRate"]:

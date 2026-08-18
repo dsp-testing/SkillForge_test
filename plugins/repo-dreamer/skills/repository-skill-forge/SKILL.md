@@ -333,11 +333,12 @@ returns no completion outcomes, pass `--allow-unknown-outcomes`. This bypasses
 outcome thresholds only for patterns with zero known outcomes; if any explicit
 success or failure evidence exists, the normal outcome gates still apply.
 
-Eligibility remains at least three distinct sessions, two distinct days, three
-known outcomes, 0.7 success, 0.5 scored coverage, and either two merged PRs or
-two mainline-corroborated observations. The temporary unknown-outcome mode
-waives the three outcome requirements only when all outcomes are unavailable.
-Partial coverage does not change the remaining thresholds and must remain
+Eligibility always requires at least three distinct sessions, two distinct
+days, and either two merged PRs or two mainline-corroborated observations.
+When outcomes are available, it also requires three known outcomes, 0.7
+success, and 0.5 scored coverage. The temporary unknown-outcome mode waives
+only those three outcome requirements when all outcomes are unavailable.
+Partial coverage does not change the applicable thresholds and must remain
 visible.
 
 ### 7. Author, review, and queue proposals
