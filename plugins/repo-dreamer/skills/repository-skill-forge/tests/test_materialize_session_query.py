@@ -196,6 +196,41 @@ class MaterializeSessionQueryTests(unittest.TestCase):
                 materializer.parse_rows("discovery", header, rows),
             )
 
+    def test_matches_detailed_content_with_sql_and_rendered_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            events_root = Path(temporary)
+            event_dir = events_root / "session-1"
+            event_dir.mkdir()
+            sql = "SELECT id AS session_id, updated_at FROM sessions"
+            content = "\n".join(
+                [
+                    "1 row(s) returned:",
+                    "",
+                    "| session_id | updated_at |",
+                    "| --- | --- |",
+                    "| session-1 | 2026-08-01T00:00:00Z |",
+                ]
+            )
+            event = {
+                "type": "tool.execution_complete",
+                "data": {
+                    "success": True,
+                    "result": {
+                        "content": content,
+                        "detailedContent": (
+                            "SQL (session_store/repo/owner/repository): "
+                            f"{sql}\n\n{content}"
+                        ),
+                    },
+                },
+            }
+            (event_dir / "events.jsonl").write_text(
+                json.dumps(event) + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(content, materializer.result_content(events_root, sql))
+
     def test_skips_malformed_event_log_lines_before_a_match(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             events_root = Path(temporary)

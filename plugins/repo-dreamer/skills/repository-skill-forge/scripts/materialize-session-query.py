@@ -72,7 +72,11 @@ def result_content(
                     if isinstance(detailed, str)
                     else None
                 )
-                if sql_match and sql_match.group(1) == sql:
+                detailed_payload = sql_match.group(1) if sql_match else None
+                if detailed_payload == sql or (
+                    isinstance(detailed_payload, str)
+                    and detailed_payload.startswith(f"{sql}\n\n")
+                ):
                     matches.append((data.get("success"), result))
         if not matches:
             continue
