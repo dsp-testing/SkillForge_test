@@ -64,89 +64,24 @@
         },
         "partitions": { "type": "array", "items": { "type": "object" } },
         "retryHistory": { "type": "array", "items": { "type": "object" } },
-        "strategyHistory": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "required": ["kind", "batchId", "sessionHash", "reason"],
-            "properties": {
-              "kind": { "const": "tool_events_fallback" },
-              "batchId": { "type": "string" },
-              "sessionHash": { "type": "string", "pattern": "^[0-9a-f]{20}$" },
-              "reason": { "type": "string" }
-            },
-            "additionalProperties": false
-          }
-        },
+        "strategyHistory": { "type": "array", "items": { "type": "object" } },
         "blockers": { "type": "array", "items": { "type": "object" } },
-        "omittedUnits": {
+        "omittedUnits": { "type": "array", "items": { "type": "object" } },
+        "issuedActions": { "type": "array", "items": { "type": "object" } },
+        "handledActionIds": {
           "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "actionId": { "type": "string" },
-              "kind": { "type": "string" },
-              "partitionId": { "type": "string" },
-              "batchId": { "type": "string" },
-              "windowStart": { "type": "string" },
-              "windowEnd": { "type": "string" },
-              "cursor": {
-                "type": ["object", "null"],
-                "required": ["updatedAt", "sessionId"],
-                "properties": {
-                  "updatedAt": { "type": "string" },
-                  "sessionId": { "type": "string" }
-                },
-                "additionalProperties": false
-              },
-              "sessionHashes": {
-                "type": "array",
-                "minItems": 1,
-                "uniqueItems": true,
-                "items": { "type": "string", "pattern": "^[0-9a-f]{20}$" }
-              },
-              "reason": { "type": "string" }
-            },
-            "required": ["actionId", "kind", "partitionId", "reason"],
-            "allOf": [
-              {
-                "if": {
-                  "properties": { "kind": { "const": "discovery" } },
-                  "required": ["kind"]
-                },
-                "then": {
-                  "required": ["windowStart", "windowEnd"]
-                },
-                "else": {
-                  "required": ["batchId", "sessionHashes"]
-                }
-              }
-            ],
-            "additionalProperties": false
-          }
+          "items": { "type": "string" }
         },
-        "issuedActions": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "required": ["actionId", "kind", "partitionId", "limit", "outputPath", "sql"],
-            "properties": {
-              "actionId": { "type": "string" },
-              "kind": { "type": "string" },
-              "partitionId": { "type": "string" },
-              "batchId": { "type": "string" },
-              "limit": { "type": "integer", "minimum": 1 },
-              "outputPath": { "type": "string" },
-              "strategy": { "type": "string" },
-              "sql": { "type": "string" }
-            },
-            "additionalProperties": false
-          }
-        },
-        "handledActionIds": { "type": "array", "items": { "type": "string" } },
         "workCounters": {
           "type": "object",
-          "required": ["queryAttempts", "successfulQueries", "failedQueries", "rows", "toolCalls", "artifactBytes"],
+          "required": [
+            "queryAttempts",
+            "successfulQueries",
+            "failedQueries",
+            "rows",
+            "toolCalls",
+            "artifactBytes"
+          ],
           "properties": {
             "queryAttempts": { "type": "integer", "minimum": 0 },
             "successfulQueries": { "type": "integer", "minimum": 0 },
@@ -196,7 +131,15 @@
     },
     "sanitizedPrimitive": {
       "type": "object",
-      "required": ["evidenceKey", "fingerprint", "kind", "sessionId", "surface", "outcome", "sourceContentRetained"],
+      "required": [
+        "evidenceKey",
+        "fingerprint",
+        "kind",
+        "sessionId",
+        "surface",
+        "outcome",
+        "sourceContentRetained"
+      ],
       "properties": {
         "evidenceKey": { "type": "string" },
         "fingerprint": { "type": "string" },
@@ -219,7 +162,15 @@
     },
     "candidateDocument": {
       "type": "object",
-      "required": ["schemaVersion", "scope", "thresholds", "userDiversity", "coverage", "usagePatterns", "candidates"],
+      "required": [
+        "schemaVersion",
+        "scope",
+        "thresholds",
+        "userDiversity",
+        "coverage",
+        "usagePatterns",
+        "candidates"
+      ],
       "properties": {
         "schemaVersion": { "const": 1 },
         "scope": {
@@ -242,220 +193,70 @@
       },
       "additionalProperties": false
     },
-    "state": {
+    "proposalMetadata": {
       "type": "object",
-      "required": [
-        "schemaVersion",
-        "stateVersion",
-        "scope",
-        "cursor",
-        "updatedAt",
-        "observations",
-        "proposalQueue",
-        "proposalHistory"
-      ],
+      "required": ["proposalKey", "proposalVersion", "candidateIds", "decision"],
       "properties": {
-        "schemaVersion": { "const": 2 },
-        "stateVersion": { "type": "integer", "minimum": 1 },
-        "scope": {
-          "type": "object",
-          "required": ["kind", "repository"],
-          "properties": {
-            "kind": { "const": "repository" },
-            "repository": { "type": "string" }
-          },
-          "additionalProperties": false
+        "proposalKey": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
         },
-        "cursor": { "type": ["string", "null"] },
-        "updatedAt": { "type": "string" },
-        "observations": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/compactObservation" }
-        },
-        "fingerprintCatalog": {
-          "type": "object",
-          "maxProperties": 64,
-          "propertyNames": { "pattern": "^[0-9a-f]{16}$" },
-          "additionalProperties": {
-            "type": "object",
-            "required": ["kind", "signatureVersion", "signature", "lastSeenAt"],
-            "properties": {
-              "kind": { "enum": ["command", "script"] },
-              "signatureVersion": { "const": 1 },
-              "signature": { "type": "object", "minProperties": 1 },
-              "lastSeenAt": { "type": "string" }
-            },
-            "additionalProperties": false
-          }
-        },
-        "proposalQueue": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/proposalQueueEntry" }
-        },
-        "proposalHistory": {
-          "type": "object",
-          "additionalProperties": { "$ref": "#/$defs/proposalHistoryEntry" }
-        }
-      },
-      "additionalProperties": false
-    },
-    "compactObservation": {
-      "type": "object",
-      "required": [
-        "evidenceKey",
-        "fingerprint",
-        "sessionHash",
-        "completedAt",
-        "day",
-        "outcome",
-        "surface",
-        "kind",
-        "branchHash",
-        "branchCategory",
-        "pathFamilies",
-        "refs"
-      ],
-      "properties": {
-        "evidenceKey": { "type": "string", "pattern": "^[0-9a-f]{24}$" },
-        "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
-        "sessionHash": { "type": "string", "pattern": "^[0-9a-f]{16,64}$" },
-        "completedAt": { "type": ["string", "null"] },
-        "day": { "type": ["string", "null"] },
-        "outcome": { "enum": ["success", "failure", "unknown"] },
-        "surface": { "enum": ["cli", "cca", "ccr"] },
-        "kind": { "enum": ["script", "command"] },
-        "branchHash": {
-          "oneOf": [{ "type": "null" }, { "type": "string", "pattern": "^[0-9a-f]{16,64}$" }]
-        },
-        "branchCategory": { "enum": ["default", "other", "unknown"] },
-        "pathFamilies": {
-          "type": "array",
-          "maxItems": 8,
-          "items": { "type": "string", "minLength": 1 }
-        },
-        "refs": {
-          "type": "array",
-          "maxItems": 8,
-          "items": {
-            "type": "object",
-            "required": ["type", "value"],
-            "properties": {
-              "type": { "enum": ["pr", "issue", "commit"] },
-              "value": { "type": "string", "minLength": 1 }
-            },
-            "additionalProperties": false
-          }
-        }
-      },
-      "additionalProperties": false
-    },
-    "proposalQueueEntry": {
-      "type": "object",
-      "required": ["proposalKey", "candidateIds", "proposalVersion", "decision", "rank", "enqueuedAt"],
-      "properties": {
-        "proposalKey": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "proposalVersion": { "type": "string", "minLength": 1 },
         "candidateIds": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
           "items": { "type": "string", "minLength": 1 }
         },
-        "proposalVersion": { "type": "string", "minLength": 1 },
         "decision": {
-          "enum": ["create_skill", "improve_existing_skill", "merge_skills", "hold_as_pattern_only"]
-        },
-        "rank": { "type": "integer", "minimum": 0 },
-        "enqueuedAt": { "type": "string" },
-        "reconciliation": {
-          "oneOf": [
-            { "type": "null" },
-            {
-              "type": "object",
-              "required": ["allowed", "reason", "action"],
-              "properties": {
-                "allowed": { "type": "boolean" },
-                "reason": { "type": "string", "minLength": 1 },
-                "action": { "enum": ["create", "update", "skip", "hold"] },
-                "existingPrRef": { "type": "string" },
-                "existingStatus": { "enum": ["open", "closed", "merged"] },
-                "existingDraft": { "type": "boolean" },
-                "nextAllowedAt": { "type": "string" }
-              },
-              "additionalProperties": false
-            }
+          "enum": [
+            "create_skill",
+            "improve_existing_skill",
+            "merge_skills",
+            "hold_as_pattern_only"
           ]
         }
       },
       "additionalProperties": false
     },
-    "proposalHistoryEntry": {
+    "proposalCatalogEntry": {
       "type": "object",
       "required": [
         "proposalKey",
-        "candidateIds",
         "proposalVersion",
+        "candidateIds",
         "decision",
+        "number",
+        "url",
         "status",
-        "publishedAt",
-        "prRef",
-        "draft"
+        "draft",
+        "updatedAt"
       ],
       "properties": {
-        "proposalKey": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "proposalKey": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "proposalVersion": { "type": "string", "minLength": 1 },
         "candidateIds": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
           "items": { "type": "string", "minLength": 1 }
         },
-        "proposalVersion": { "type": "string", "minLength": 1 },
         "decision": {
-          "enum": ["create_skill", "improve_existing_skill", "merge_skills", "hold_as_pattern_only"]
+          "enum": [
+            "create_skill",
+            "improve_existing_skill",
+            "merge_skills",
+            "hold_as_pattern_only"
+          ]
         },
-        "status": {
-          "enum": ["open", "published", "closed", "merged", "rejected", "blocked", "held", "skipped"]
-        },
-        "publishedAt": { "type": "string" },
-        "prRef": { "type": ["string", "null"] },
+        "number": { "type": "integer", "minimum": 1 },
+        "url": { "type": "string" },
+        "status": { "enum": ["open", "closed", "merged"] },
         "draft": { "type": "boolean" },
-        "lastEvaluation": {
-          "type": "object",
-          "required": ["candidateIds", "proposalVersion", "decision", "status", "evaluatedAt"],
-          "properties": {
-            "candidateIds": {
-              "type": "array",
-              "minItems": 1,
-              "uniqueItems": true,
-              "items": { "type": "string", "minLength": 1 }
-            },
-            "proposalVersion": { "type": "string", "minLength": 1 },
-            "decision": {
-              "enum": ["create_skill", "improve_existing_skill", "merge_skills", "hold_as_pattern_only"]
-            },
-            "status": {
-              "enum": ["open", "published", "closed", "merged", "rejected", "blocked", "held", "skipped"]
-            },
-            "evaluatedAt": { "type": "string" }
-          },
-          "additionalProperties": false
-        }
-      },
-      "additionalProperties": false
-    },
-    "legacyProposalHistoryEntry": {
-      "type": "object",
-      "required": ["candidateVersion", "decision", "status", "publishedAt", "prRef"],
-      "properties": {
-        "candidateVersion": { "type": "string", "minLength": 1 },
-        "decision": {
-          "enum": ["create_skill", "improve_existing_skill", "merge_skills", "hold_as_pattern_only"]
-        },
-        "status": {
-          "enum": ["open", "published", "merged", "rejected", "blocked", "held"]
-        },
-        "publishedAt": { "type": "string" },
-        "prRef": { "type": ["string", "null"] },
-        "lastEvaluation": { "type": "object" }
+        "updatedAt": { "type": "string" }
       },
       "additionalProperties": false
     }

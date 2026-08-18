@@ -95,6 +95,9 @@ def validate(document: dict[str, Any]) -> list[str]:
         errors.append("candidateIds must be a non-empty array of unique strings")
     if not document.get("proposalVersion"):
         errors.append("proposalVersion is required")
+    rank = document.get("rank")
+    if not isinstance(rank, int) or isinstance(rank, bool) or rank < 0:
+        errors.append("rank must be a non-negative integer")
     validate_extraction(document, errors)
     review = document.get("review")
     if not isinstance(review, dict):
@@ -119,8 +122,8 @@ def validate(document: dict[str, Any]) -> list[str]:
         action = publication.get("action")
         if action not in PUBLICATION_ACTIONS:
             errors.append("publication action is invalid")
-        if action == "create" and publication.get("cooldownSatisfied") is not True:
-            errors.append("publication cooldown is not satisfied")
+        if publication.get("markerValidated") is not True:
+            errors.append("publication marker was not validated")
     if decision == "hold_as_pattern_only" and document.get("skillPath"):
         errors.append("hold decisions must not include a skillPath")
     if decision != "hold_as_pattern_only" and not document.get("skillPath"):

@@ -1,41 +1,17 @@
 #!/usr/bin/env python3
 # Copyright (c) Microsoft Corporation. All rights reserved.
 
-"""Merge incremental evidence, rebuild aggregates, and rank Forge candidates."""
+"""Deduplicate current-run evidence, rebuild aggregates, and rank candidates."""
 
 from __future__ import annotations
 
 import argparse
-import importlib.util
-import json
 import re
 from collections import defaultdict
 from datetime import timedelta
-from pathlib import Path
 from typing import Any
 
-from forge_common import parse_timestamp, read_json, stable_hash, timestamp_text, write_json
-
-SIGNATURE_VERSION = 1
-MAX_FINGERPRINT_CATALOG_ENTRIES = 64
-MAX_FINGERPRINT_CATALOG_BYTES = 12_000
-MAX_SIGNATURE_BYTES = 2_000
-
-
-def validate_next_state(
-    state: dict[str, Any],
-    repository: str,
-) -> dict[str, Any]:
-    validator_path = Path(__file__).with_name("issue-state.py")
-    spec = importlib.util.spec_from_file_location(
-        "repository_skill_forge_issue_state",
-        validator_path,
-    )
-    if spec is None or spec.loader is None:
-        raise ValueError("unable to load issue state validator")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.validate_state(state, repository)
+from forge_common import parse_timestamp, read_json, stable_hash, write_json
 
 
 def reference_values(primitive: dict[str, Any], ref_type: str) -> set[str]:
@@ -50,42 +26,10 @@ def reference_values(primitive: dict[str, Any], ref_type: str) -> set[str]:
 
 
 def merge_evidence(
-    state: dict[str, Any] | None,
     document: dict[str, Any],
     repository: str,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    previous_scope = state.get("scope") if isinstance(state, dict) else None
-    if isinstance(previous_scope, dict) and previous_scope.get("repository") != repository:
-        raise ValueError("state repository does not match the current repository")
+) -> list[dict[str, Any]]:
     evidence_by_key: dict[str, dict[str, Any]] = {}
-    fingerprint_catalog = (
-        state.get("fingerprintCatalog", {})
-        if isinstance(state, dict)
-        else {}
-    )
-    fingerprint_catalog = (
-        fingerprint_catalog if isinstance(fingerprint_catalog, dict) else {}
-    )
-    if isinstance(state, dict):
-        for item in state.get("observations", state.get("evidenceLedger", [])):
-            if isinstance(item, dict) and item.get("evidenceKey"):
-                restored = dict(item)
-                catalog_entry = fingerprint_catalog.get(str(item.get("fingerprint")))
-                if (
-                    isinstance(catalog_entry, dict)
-                    and catalog_entry.get("kind") == item.get("kind")
-                    and catalog_entry.get("signatureVersion") == SIGNATURE_VERSION
-                    and isinstance(catalog_entry.get("signature"), dict)
-                    and stable_hash(
-                        {
-                            "kind": item.get("kind"),
-                            "signature": catalog_entry["signature"],
-                        }
-                    )
-                    == item.get("fingerprint")
-                ):
-                    restored["signature"] = catalog_entry["signature"]
-                evidence_by_key[str(item["evidenceKey"])] = restored
     for item in document.get("primitives", []):
         if isinstance(item, dict) and item.get("evidenceKey"):
             evidence_by_key[str(item["evidenceKey"])] = compact_observation(
@@ -95,65 +39,7 @@ def merge_evidence(
                 "signature": item.get("signature") if isinstance(item.get("signature"), dict) else {},
                 "commandTemplate": item.get("commandTemplate"),
             }
-    history = state.get("proposalHistory", {}) if isinstance(state, dict) else {}
-    return list(evidence_by_key.values()), history if isinstance(history, dict) else {}
-
-
-def build_fingerprint_catalog(
-    evidence: list[dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    entries: dict[str, dict[str, Any]] = {}
-    for item in evidence:
-        fingerprint = item.get("fingerprint")
-        kind = item.get("kind")
-        signature = item.get("signature")
-        completed_at = item.get("completedAt")
-        if (
-            not isinstance(fingerprint, str)
-            or kind not in {"command", "script"}
-            or not isinstance(signature, dict)
-            or not signature
-            or not isinstance(completed_at, str)
-            or stable_hash({"kind": kind, "signature": signature}) != fingerprint
-        ):
-            continue
-        signature_bytes = len(
-            json.dumps(signature, sort_keys=True, separators=(",", ":")).encode()
-        )
-        if signature_bytes > MAX_SIGNATURE_BYTES:
-            continue
-        current = entries.get(fingerprint)
-        if current is None or parse_timestamp(completed_at) > parse_timestamp(
-            current["lastSeenAt"]
-        ):
-            entries[fingerprint] = {
-                "kind": kind,
-                "signatureVersion": SIGNATURE_VERSION,
-                "signature": signature,
-                "lastSeenAt": completed_at,
-            }
-
-    retained: dict[str, dict[str, Any]] = {}
-    retained_bytes = 2
-    ordered = sorted(
-        entries.items(),
-        key=lambda item: (-parse_timestamp(item[1]["lastSeenAt"]).timestamp(), item[0]),
-    )
-    for fingerprint, entry in ordered:
-        if len(retained) >= MAX_FINGERPRINT_CATALOG_ENTRIES:
-            break
-        entry_bytes = len(
-            json.dumps(
-                {fingerprint: entry},
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-        )
-        if retained_bytes + entry_bytes > MAX_FINGERPRINT_CATALOG_BYTES:
-            continue
-        retained[fingerprint] = entry
-        retained_bytes += entry_bytes
-    return dict(sorted(retained.items()))
+    return list(evidence_by_key.values())
 
 
 def compact_observation(item: dict[str, Any], repository: str) -> dict[str, Any]:
@@ -364,11 +250,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--in", dest="input", required=True)
     parser.add_argument("--out", dest="output", required=True)
-    parser.add_argument("--state-in")
-    parser.add_argument("--state-out", required=True)
     parser.add_argument("--repository", required=True)
     parser.add_argument("--as-of", required=True)
-    parser.add_argument("--next-cursor", required=True)
     parser.add_argument("--merged-prs")
     parser.add_argument("--active-days", type=int, default=90)
     parser.add_argument("--stale-days", type=int, default=180)
@@ -383,19 +266,16 @@ def main() -> None:
     args = parser.parse_args()
 
     document = read_json(args.input)
-    state = read_json(args.state_in) if args.state_in else None
     merged_pr_values = read_json(args.merged_prs) if args.merged_prs else []
     if not isinstance(document, dict):
         raise SystemExit("input must be a sanitized primitive document")
-    if state is not None and not isinstance(state, dict):
-        raise SystemExit("state must be a JSON object")
     if not isinstance(merged_pr_values, list):
         raise SystemExit("merged PR input must be a JSON array")
     if document.get("coverage", {}).get("truncated"):
         raise SystemExit("refusing to aggregate truncated evidence")
 
     try:
-        evidence, proposal_history = merge_evidence(state, document, args.repository)
+        evidence = merge_evidence(document, args.repository)
         thresholds = {
             "minDistinctSessions": args.min_distinct_sessions,
             "minDistinctDays": args.min_distinct_days,
@@ -433,36 +313,7 @@ def main() -> None:
         "usagePatterns": patterns,
         "candidates": candidates,
     }
-    stale_start = parse_timestamp(args.as_of) - timedelta(days=args.stale_days)
-    retained_evidence = [
-        item
-        for item in evidence
-        if isinstance(item.get("completedAt"), str)
-        and parse_timestamp(str(item["completedAt"])) >= stale_start
-    ]
-    retained_observations = [
-        compact_observation(item, args.repository)
-        for item in retained_evidence
-    ]
-    prior_version = state.get("stateVersion", 0) if isinstance(state, dict) else 0
-    proposal_queue = state.get("proposalQueue", []) if isinstance(state, dict) else []
-    next_state = {
-        "schemaVersion": 2,
-        "stateVersion": prior_version + 1,
-        "scope": {"kind": "repository", "repository": args.repository},
-        "cursor": args.next_cursor,
-        "updatedAt": timestamp_text(parse_timestamp(args.as_of)),
-        "observations": sorted(
-            retained_observations,
-            key=lambda item: str(item.get("evidenceKey")),
-        ),
-        "fingerprintCatalog": build_fingerprint_catalog(retained_evidence),
-        "proposalQueue": proposal_queue if isinstance(proposal_queue, list) else [],
-        "proposalHistory": proposal_history,
-    }
-    validated_state = validate_next_state(next_state, args.repository)
     write_json(args.output, result)
-    write_json(args.state_out, validated_state)
 
 
 if __name__ == "__main__":

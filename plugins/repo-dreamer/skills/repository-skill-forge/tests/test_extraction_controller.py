@@ -990,6 +990,7 @@ class ExtractionControllerTests(unittest.TestCase):
             "proposalKey": "partial-discovery",
             "candidateIds": ["candidate-1"],
             "proposalVersion": "version-1",
+            "rank": 0,
             "extraction": {
                 "status": "partial",
                 "discoveryComplete": False,
@@ -1011,6 +1012,7 @@ class ExtractionControllerTests(unittest.TestCase):
                 "duplicate": False,
                 "reconciled": True,
                 "action": "hold",
+                "markerValidated": True,
             },
         }
 
