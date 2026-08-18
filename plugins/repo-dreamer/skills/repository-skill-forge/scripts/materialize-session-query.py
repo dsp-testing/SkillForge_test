@@ -86,6 +86,7 @@ def result_content(
             call_id = data.get("toolCallId")
             if (
                 action_id is not None
+                and data.get("toolName") == "session_store_sql"
                 and isinstance(arguments, dict)
                 and arguments.get("description") == action_id
                 and isinstance(arguments.get("query"), str)
@@ -111,7 +112,7 @@ def result_content(
             described_starts,
             key=lambda start: (-start[0], start[1]),
         )
-        if submitted_sql != sql:
+        if normalize_sql(submitted_sql) != normalized_sql:
             raise QueryHandoffMismatch(
                 f"session_store_sql query handoff mismatch for action {action_id}"
             )

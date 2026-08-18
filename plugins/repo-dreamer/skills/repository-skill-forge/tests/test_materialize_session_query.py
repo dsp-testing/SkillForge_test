@@ -315,6 +315,7 @@ class MaterializeSessionQueryTests(unittest.TestCase):
                         "toolCallId": "call-1",
                         "toolName": "session_store_sql",
                         "arguments": {
+                            "description": "discovery-1",
                             "query": "SELECT session_id, updated_at FROM sessions",
                         },
                     },
@@ -336,7 +337,59 @@ class MaterializeSessionQueryTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            self.assertEqual(content, materializer.result_content(events_root, sql))
+            self.assertEqual(
+                content,
+                materializer.result_content(events_root, sql, "discovery-1"),
+            )
+
+    def test_ignores_matching_description_from_other_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            events_root = Path(temporary)
+            event_dir = events_root / "session-1"
+            event_dir.mkdir()
+            sql = "SELECT id FROM sessions"
+            content = "Query returned 0 rows."
+            events = [
+                {
+                    "type": "tool.execution_start",
+                    "data": {
+                        "toolCallId": "other-call",
+                        "toolName": "other_query_tool",
+                        "arguments": {
+                            "description": "discovery-1",
+                            "query": "SELECT altered FROM elsewhere",
+                        },
+                    },
+                },
+                {
+                    "type": "tool.execution_start",
+                    "data": {
+                        "toolCallId": "session-call",
+                        "toolName": "session_store_sql",
+                        "arguments": {"query": sql},
+                    },
+                },
+                {
+                    "type": "tool.execution_complete",
+                    "data": {
+                        "toolCallId": "session-call",
+                        "success": True,
+                        "result": {
+                            "content": content,
+                            "detailedContent": "SQL omitted",
+                        },
+                    },
+                },
+            ]
+            (event_dir / "events.jsonl").write_text(
+                "".join(json.dumps(event) + "\n" for event in events),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                content,
+                materializer.result_content(events_root, sql, "discovery-1"),
+            )
 
     def test_prefers_exact_start_sql_over_normalized_match(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
