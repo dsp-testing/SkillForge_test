@@ -27,8 +27,45 @@ class QueryHandoffMismatch(ValueError):
     """The action ID matched, but the submitted SQL differed."""
 
 
-def normalize_sql(sql: str) -> str:
-    return " ".join(sql.split())
+def normalize_sql(sql: str) -> tuple[str, ...]:
+    tokens: list[str] = []
+    index = 0
+    while index < len(sql):
+        character = sql[index]
+        if character.isspace():
+            index += 1
+            continue
+        if character in {"'", '"'}:
+            quote = character
+            end = index + 1
+            while end < len(sql):
+                if sql[end] == quote:
+                    if end + 1 < len(sql) and sql[end + 1] == quote:
+                        end += 2
+                        continue
+                    end += 1
+                    break
+                end += 1
+            tokens.append(sql[index:end])
+            index = end
+            continue
+        if character.isalnum() or character in {"_", "$"}:
+            end = index + 1
+            while end < len(sql) and (
+                sql[end].isalnum() or sql[end] in {"_", "$"}
+            ):
+                end += 1
+            tokens.append(sql[index:end])
+            index = end
+            continue
+        operator = sql[index : index + 2]
+        if operator in {">=", "<=", "<>", "!=", "||", "::"}:
+            tokens.append(operator)
+            index += 2
+            continue
+        tokens.append(character)
+        index += 1
+    return tuple(tokens)
 
 
 def read_events(path: Path) -> Iterator[dict[str, Any]]:

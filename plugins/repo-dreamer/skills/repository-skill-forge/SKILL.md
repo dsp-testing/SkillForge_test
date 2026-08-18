@@ -233,6 +233,19 @@ already found. Continue invoking the controller while its state is `running`;
 the agent must not independently declare the run blocked because remaining work
 is slow or numerous.
 
+Before leaving extraction, updating state, or reporting any terminal outcome,
+require the controller to confirm that extraction is terminal:
+
+```bash
+python3 "$SKILL_DIR/scripts/extraction-controller.py" assert-terminal \
+  --state "$RUN_DIR/extraction-state.json"
+```
+
+This command fails while state is `running` and identifies any issued actions
+that still require outcomes. A run is blocked only when this command returns
+`status: blocked` with the controller-recorded blocker. Never describe
+incomplete `running` work as blocked.
+
 Generate the next bounded action batch with:
 
 ```bash
