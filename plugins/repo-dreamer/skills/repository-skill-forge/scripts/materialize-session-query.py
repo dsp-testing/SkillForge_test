@@ -52,7 +52,12 @@ def result_content(
         matches: list[tuple[bool | None, dict[str, Any]]] = []
         with event_file.open(encoding="utf-8") as handle:
             for line in handle:
-                event = json.loads(line)
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
                 if event.get("type") != "tool.execution_complete":
                     continue
                 data = event.get("data")
@@ -72,8 +77,10 @@ def result_content(
         if not matches:
             continue
         success, result = matches[-1]
-        if success is False:
-            raise ValueError("matching session_store_sql call failed")
+        if success is not True:
+            raise ValueError(
+                "matching session_store_sql call was not explicitly successful"
+            )
         content = result.get("content")
         if not isinstance(content, str):
             raise ValueError("matching session_store_sql result has no content")

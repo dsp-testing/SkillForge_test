@@ -196,6 +196,55 @@ class MaterializeSessionQueryTests(unittest.TestCase):
                 materializer.parse_rows("discovery", header, rows),
             )
 
+    def test_skips_malformed_event_log_lines_before_a_match(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            events_root = Path(temporary)
+            event_dir = events_root / "session-1"
+            event_dir.mkdir()
+            sql = "SELECT id AS session_id, updated_at FROM sessions"
+            event = {
+                "type": "tool.execution_complete",
+                "data": {
+                    "success": True,
+                    "result": {
+                        "content": "Query returned 0 rows.",
+                        "detailedContent": f"SQL (session_store/repo/owner/repository): {sql}",
+                    },
+                },
+            }
+            (event_dir / "events.jsonl").write_text(
+                "\n{partially-written\n" + json.dumps(event) + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                "Query returned 0 rows.",
+                materializer.result_content(events_root, sql),
+            )
+
+    def test_rejects_match_without_explicit_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            events_root = Path(temporary)
+            event_dir = events_root / "session-1"
+            event_dir.mkdir()
+            sql = "SELECT id AS session_id, updated_at FROM sessions"
+            event = {
+                "type": "tool.execution_complete",
+                "data": {
+                    "result": {
+                        "content": "Query returned 0 rows.",
+                        "detailedContent": f"SQL (session_store/repo/owner/repository): {sql}",
+                    },
+                },
+            }
+            (event_dir / "events.jsonl").write_text(
+                json.dumps(event) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "not explicitly successful"):
+                materializer.result_content(events_root, sql)
+
     def test_zero_rows_and_row_count_mismatch_are_explicit(self) -> None:
         self.assertEqual((None, []), materializer.table_rows("Query returned 0 rows."))
         with self.assertRaisesRegex(ValueError, "row count mismatch"):
