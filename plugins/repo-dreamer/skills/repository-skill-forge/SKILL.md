@@ -55,12 +55,13 @@ ephemeral execution state, not cross-run Forge memory.
 Use the exact fixed rolling window for every run. Do not derive it from an
 issue, a previous run, or the last published PR.
 
-Find every open and closed pull request with the `skills-forge` label. Request
-at least PR number, URL, state, draft status, merged timestamp, updated
-timestamp, and complete body. Do not require a separate label-existence lookup
-or label-creation capability before extraction. An empty labeled-PR search is a
-valid empty catalog; it does not prove whether the label exists and must not
-block analysis.
+Search open and closed pull requests for the literal
+`repository-skill-forge-proposal:v1` marker, regardless of labels. Request at
+least PR number, URL, state, draft status, merged timestamp, updated timestamp,
+and complete body for every match. Also use general PR search when evaluating a
+candidate to find semantically related work that predates the marker or was not
+created by Forge. Labels are optional organizational metadata and are never an
+identity, discovery, deduplication, or blocking mechanism.
 
 Write the returned PR array to `$RUN_DIR/forge-prs.json`, then build the catalog:
 
@@ -306,11 +307,9 @@ TARGET_SHA="$(
 
 If no proposal is selected, missing target identity must not block the run.
 If selected and target identity cannot be resolved, block before publication.
-Only after a proposal is selected, verify that `skills-forge` exists and can be
-applied to the created or updated PR. Create the label when supported. If the
-label cannot be verified, created, or applied, block before publication. Never
-publish an unlabeled Forge PR. Label capability is irrelevant to a successful
-no-proposal result.
+After publication, apply `skills-forge` when the label exists and the available
+GitHub tools support it. Label lookup, creation, or application failure is
+non-blocking because the persistent marker is the authoritative Forge identity.
 
 The PR body includes the marker, proposal identity, candidate IDs, confidence,
 fixed evidence window, target SHA, validation, review findings, and the
@@ -330,12 +329,12 @@ than one PR create/update, and a persistent valid marker in every published
 Forge PR.
 
 Fail explicitly on undisclosed omissions, malformed PR metadata, leakage,
-unsafe proposals, or blocked publication. Missing label/write tools are a
-publication blocker only after a proposal is selected; they must not interrupt
-running extraction or a no-proposal result. Never fabricate evidence. Large
-repositories still use the full fixed window by default; long asynchronous
-runtime alone is not a reason to sample. Introduce deterministic sampling only
-after observing a concrete tool-call, output, context, or automation limit.
+unsafe proposals, missing required publication tools, or blocked publication.
+Label tools are optional and must never interrupt extraction, publication, or a
+no-proposal result. Never fabricate evidence. Large repositories still use the
+full fixed window by default; long asynchronous runtime alone is not a reason
+to sample. Introduce deterministic sampling only after observing a concrete
+tool-call, output, context, or automation limit.
 
 ## Assets
 
