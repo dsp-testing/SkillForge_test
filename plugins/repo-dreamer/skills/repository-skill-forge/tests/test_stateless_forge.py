@@ -191,6 +191,26 @@ class ProposalMarkerTests(unittest.TestCase):
                 self.assertFalse(result["allowed"])
                 self.assertEqual("skip", result["action"])
 
+    def test_duplicate_proposal_identity_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "duplicate proposalKey"):
+            ledger.reconcile(
+                proposal(),
+                [
+                    catalog_entry(status="closed", number=1),
+                    catalog_entry(status="merged", number=2),
+                ],
+            )
+
+    def test_multiple_open_prs_for_one_key_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "multiple open PRs"):
+            ledger.reconcile(
+                proposal(version="version-3"),
+                [
+                    catalog_entry(version="version-1", status="open", number=1),
+                    catalog_entry(version="version-2", status="open", number=2),
+                ],
+            )
+
     def test_new_version_updates_open_pr(self) -> None:
         result = ledger.reconcile(
             proposal(version="version-2"),

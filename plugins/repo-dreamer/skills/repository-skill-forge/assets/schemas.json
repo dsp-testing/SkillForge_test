@@ -72,7 +72,26 @@
           "type": "array",
           "items": { "type": "string" }
         },
-        "workCounters": { "type": "object" },
+        "workCounters": {
+          "type": "object",
+          "required": [
+            "queryAttempts",
+            "successfulQueries",
+            "failedQueries",
+            "rows",
+            "toolCalls",
+            "artifactBytes"
+          ],
+          "properties": {
+            "queryAttempts": { "type": "integer", "minimum": 0 },
+            "successfulQueries": { "type": "integer", "minimum": 0 },
+            "failedQueries": { "type": "integer", "minimum": 0 },
+            "rows": { "type": "integer", "minimum": 0 },
+            "toolCalls": { "type": "integer", "minimum": 0 },
+            "artifactBytes": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
         "coverage": { "type": ["object", "null"] },
         "status": { "enum": ["running", "complete", "partial", "blocked"] }
       },

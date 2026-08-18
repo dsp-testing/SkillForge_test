@@ -109,10 +109,31 @@ def build_catalog(prs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(catalog, key=lambda item: item["number"])
 
 
+def validate_catalog_invariants(catalog: list[dict[str, Any]]) -> None:
+    identities: set[tuple[str, str]] = set()
+    open_keys: set[str] = set()
+    for item in catalog:
+        proposal_key = str(item.get("proposalKey") or "")
+        proposal_version = str(item.get("proposalVersion") or "")
+        identity = (proposal_key, proposal_version)
+        if identity in identities:
+            raise ValueError(
+                "PR catalog contains duplicate proposalKey and proposalVersion"
+            )
+        identities.add(identity)
+        if item.get("status") == "open":
+            if proposal_key in open_keys:
+                raise ValueError(
+                    "PR catalog contains multiple open PRs for one proposalKey"
+                )
+            open_keys.add(proposal_key)
+
+
 def reconcile(
     proposal: dict[str, Any],
     catalog: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    validate_catalog_invariants(catalog)
     payload = marker_payload(proposal)
     if payload["decision"] == "hold_as_pattern_only":
         return {
