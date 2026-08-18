@@ -24,7 +24,7 @@ TOKEN_PATTERNS = (
             r"""
             \b(?:password|passwd|token|secret|api[_-]?key)\s*[:=]\s*
             (?:
-                (?P<quote>['"])[^'"\r\n]{12,}(?P=quote)
+                (?P<quote>['"])(?!<|\$\{|\$[A-Z_]+)[^'"\r\n]{12,}(?P=quote)
                 |
                 (?!<|\$\{|\$[A-Z_]+)
                 [A-Za-z0-9._~+/=-]{12,}(?![A-Za-z0-9._~+/=\-\[(])

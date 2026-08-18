@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 import unittest
 from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = SKILL_DIR / "scripts"
+sys.path.insert(0, str(SCRIPTS_DIR))
 
 SANITIZER_SPEC = importlib.util.spec_from_file_location(
     "sanitize_evidence",
@@ -36,6 +38,18 @@ class SanitizeEvidenceTests(unittest.TestCase):
                 findings = sanitizer.findings(value, "evidence-1", "command")
                 self.assertEqual(["assigned_secret"], [item["kind"] for item in findings])
                 self.assertEqual("<redacted-secret>", sanitizer.redact(value))
+
+    def test_quoted_placeholders_are_not_secrets(self) -> None:
+        values = [
+            'token="$GITHUB_TOKEN"',
+            'token="${GITHUB_TOKEN}"',
+            'token="<placeholder>"',
+        ]
+
+        for value in values:
+            with self.subTest(value=value):
+                self.assertEqual([], sanitizer.findings(value, "evidence-1", "command"))
+                self.assertEqual(value, sanitizer.redact(value))
 
 
 if __name__ == "__main__":
