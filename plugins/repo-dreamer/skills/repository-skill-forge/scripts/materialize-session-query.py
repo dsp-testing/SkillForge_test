@@ -50,6 +50,7 @@ def result_content(
     )
     for event_file in event_files:
         matches: list[tuple[bool | None, dict[str, Any]]] = []
+        matching_call_ids: set[str] = set()
         with event_file.open(encoding="utf-8") as handle:
             for line in handle:
                 if not line.strip():
@@ -58,13 +59,28 @@ def result_content(
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if event.get("type") != "tool.execution_complete":
-                    continue
                 data = event.get("data")
                 if not isinstance(data, dict):
                     continue
+                if event.get("type") == "tool.execution_start":
+                    arguments = data.get("arguments")
+                    call_id = data.get("toolCallId")
+                    if (
+                        data.get("toolName") == "session_store_sql"
+                        and isinstance(arguments, dict)
+                        and arguments.get("query") == sql
+                        and isinstance(call_id, str)
+                    ):
+                        matching_call_ids.add(call_id)
+                    continue
+                if event.get("type") != "tool.execution_complete":
+                    continue
                 result = data.get("result")
                 if not isinstance(result, dict):
+                    continue
+                call_id = data.get("toolCallId")
+                if isinstance(call_id, str) and call_id in matching_call_ids:
+                    matches.append((data.get("success"), result))
                     continue
                 detailed = result.get("detailedContent")
                 sql_match = (

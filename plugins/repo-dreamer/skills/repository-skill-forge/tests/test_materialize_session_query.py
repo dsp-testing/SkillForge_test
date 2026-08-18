@@ -231,6 +231,44 @@ class MaterializeSessionQueryTests(unittest.TestCase):
 
             self.assertEqual(content, materializer.result_content(events_root, sql))
 
+    def test_matches_completion_by_exact_start_event_sql(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            events_root = Path(temporary)
+            event_dir = events_root / "session-1"
+            event_dir.mkdir()
+            sql = "SELECT id AS session_id, updated_at FROM sessions"
+            content = "Query returned 0 rows."
+            events = [
+                {
+                    "type": "tool.execution_start",
+                    "data": {
+                        "toolCallId": "call-1",
+                        "toolName": "session_store_sql",
+                        "arguments": {
+                            "description": "Discover repository sessions",
+                            "query": sql,
+                        },
+                    },
+                },
+                {
+                    "type": "tool.execution_complete",
+                    "data": {
+                        "toolCallId": "call-1",
+                        "success": True,
+                        "result": {
+                            "content": content,
+                            "detailedContent": "SQL omitted from detailed output",
+                        },
+                    },
+                },
+            ]
+            (event_dir / "events.jsonl").write_text(
+                "".join(json.dumps(event) + "\n" for event in events),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(content, materializer.result_content(events_root, sql))
+
     def test_skips_malformed_event_log_lines_before_a_match(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             events_root = Path(temporary)
