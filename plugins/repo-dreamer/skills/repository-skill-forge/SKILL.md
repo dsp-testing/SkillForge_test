@@ -104,7 +104,9 @@ modifying the issue body again; do not replace it with a blocked-run note.
 
 When the cursor is null, set `windowStart = windowEnd - 7 days`. Otherwise use
 `windowStart = cursor - 24 hours`. Deduplicate the overlap by stable
-`evidenceKey`. Resolve the default branch and SHA through GitHub MCP.
+`evidenceKey`. Read default-branch repository content through GitHub MCP by
+omitting the optional `ref`; do not require the exact branch name or commit SHA
+before extraction, candidate generation, or a no-publication decision.
 
 Do not advance the issue cursor until extraction, validation, reconciliation,
 the selected publication outcome, and the issue update all succeed.
@@ -300,6 +302,33 @@ Reconcile queued proposals against open draft, open ready, closed-unmerged, and
 merged PRs. Preserve draft state and proposal history. Run
 `proposal-ledger.py select` and create or update at most one proposal PR.
 Deferred entries remain queued.
+
+Only after a proposal is selected for publication, resolve its target branch
+and SHA. Prefer approved GitHub MCP repository metadata when available. If that
+capability is unavailable, use the already-cloned checkout's local remote refs
+without making a network request:
+
+```bash
+REPOSITORY_DIR="$(git rev-parse --show-toplevel)"
+if ! DEFAULT_REF="$(
+  git -C "$REPOSITORY_DIR" symbolic-ref --quiet refs/remotes/origin/HEAD
+)"; then
+  echo "local checkout has no origin/HEAD default-branch ref" >&2
+  exit 1
+fi
+TARGET_BRANCH="${DEFAULT_REF#refs/remotes/origin/}"
+if ! TARGET_SHA="$(
+  git -C "$REPOSITORY_DIR" rev-parse --verify "$DEFAULT_REF^{commit}"
+)"; then
+  echo "local default-branch ref does not resolve to a commit" >&2
+  exit 1
+fi
+```
+
+If no proposal is selected, exact target identity is unnecessary and its
+absence must not block the run or state advancement. If a proposal is selected
+and neither GitHub MCP nor the local default remote ref can resolve the target,
+block before publication without updating durable state.
 
 Apply `skills-forge`. The PR body includes proposal identity, candidate IDs,
 confidence, window, target SHA, validation, leakage/conflict results, and the
