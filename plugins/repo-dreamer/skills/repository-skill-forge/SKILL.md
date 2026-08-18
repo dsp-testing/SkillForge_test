@@ -120,8 +120,9 @@ strategy is:
    repository scope;
 2. fetch exact-ID `sessions` metadata in batches of 100;
 3. fetch bounded `session_refs` and `session_files`;
-4. fetch relevant `tool_requests` with pages of 500 and time-bounded completion
-   events.
+4. fetch relevant `tool_requests` directly with pages of 500, then join only
+   their exact IDs to time-bounded completion events for normalized shell exit
+   codes and completion timestamps.
 
 Tool requests are selected by exact session ID. A session created before the
 incremental window but updated inside it must not be excluded.
@@ -153,23 +154,22 @@ Every query success or failure must be recorded through
 `extraction-controller.py`. Never retry a query manually, alter controller SQL
 ad hoc, or continue after the controller returns a blocked state.
 When `session_store_sql` returns query rows to the agent instead of accepting
-the controller's `outputPath`, materialize exactly those returned rows as a
-JSON array at the action's `outputPath`, preserving nulls and scalar types. The
-lack of a tool-level `outputPath` option is expected and is not a query failure.
+the controller's `outputPath`, use the packaged materializer. It matches the
+exact controller SQL in the current automation session's local `events.jsonl`,
+follows a runtime spill-file receipt when present, parses the action-specific
+table shape, and atomically writes the JSON artifact. This local event log is
+only a transport for the current tool result; it is not a repository-wide SQL
+query against the `events` table.
+
 Materialize the full returned page, including the extra pagination sentinel
-row; the controller accepts the bounded rows and advances the cursor.
-Validate that the artifact is readable JSON before recording success:
+row; the controller accepts the bounded rows and advances the cursor:
 
 ```bash
-python3 - "$RESULT_PATH" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as handle:
-    rows = json.load(handle)
-if not isinstance(rows, list):
-    raise SystemExit("session query artifact must be a JSON array")
-PY
+RESULT_PATH="$(
+  python3 "$SKILL_DIR/scripts/materialize-session-query.py" \
+    --actions "$RUN_DIR/actions.json" \
+    --action "$ACTION_ID"
+)"
 
 python3 "$SKILL_DIR/scripts/extraction-controller.py" record-success \
   --state "$RUN_DIR/extraction-state.json" \
@@ -179,10 +179,11 @@ python3 "$SKILL_DIR/scripts/extraction-controller.py" record-success \
 mv "$RUN_DIR/extraction-state.next.json" "$RUN_DIR/extraction-state.json"
 ```
 
-Do not call `record-failure` when SQL succeeded but result materialization
-failed; that would incorrectly split or omit query work. Retry only the local
-serialization and validation step. If the returned rows cannot be materialized
-without alteration, record the integration blocker once and stop:
+Do not manually transcribe or reconstruct returned rows. Do not call
+`record-failure` when SQL succeeded but result materialization failed; that
+would incorrectly split or omit query work. Retry the packaged materializer
+once after confirming the tool call completed. If it still cannot find or
+validate the exact result, record the integration blocker once and stop:
 
 ```bash
 python3 "$SKILL_DIR/scripts/extraction-controller.py" record-artifact-failure \
@@ -348,12 +349,14 @@ coverage unknown and may permanently exclude patterns from that window.
 
 - `scripts/extraction-controller.py`: deployed fast extraction plus optional
   tool-event fallback and explicit partial omissions.
+- `scripts/materialize-session-query.py`: exact current-session tool-result
+  materialization into controller JSON artifacts.
 - `scripts/issue-state.py`: strict managed issue-state parser and renderer.
 - `scripts/aggregate-primitives.py`: compact observation merge and scoring.
 - `scripts/proposal-ledger.py`: stable proposal reconciliation and sequential
   queue selection.
-- `scripts/session_queries.py`: materialized session queries and opt-in
-  tool-event fallback SQL.
+- `scripts/session_queries.py`: materialized session queries, minimal primary
+  completion-event projection, and opt-in tool-event fallback SQL.
 - `assets/schemas.json`: extraction, state, queue, and history contracts.
 
 **Abstraction level:** strategic

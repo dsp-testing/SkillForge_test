@@ -96,6 +96,7 @@ def normalize_rows(
                 "toolCallId": as_string(row.get("tool_call_id")),
                 "name": tool_name,
                 "arguments": parsed_arguments,
+                "exitCode": row.get("exit_code"),
                 "completionSuccess": row.get("tool_complete_success"),
                 "resultContent": as_string(row.get("result_content")),
                 "completedAt": as_string(row.get("completed_at")),

@@ -174,7 +174,16 @@ def derive(document: dict[str, Any]) -> dict[str, Any]:
                 kind = "command"
                 fingerprint = stable_hash({"kind": kind, "signature": signature})
 
-            exit_code = parse_exit_code(as_string(call.get("resultContent")))
+            exit_code_value = call.get("exitCode")
+            exit_code = (
+                int(exit_code_value)
+                if isinstance(exit_code_value, int)
+                or (
+                    isinstance(exit_code_value, str)
+                    and exit_code_value.isdigit()
+                )
+                else parse_exit_code(as_string(call.get("resultContent")))
+            )
             completed_at = as_string(call.get("completedAt")) or as_string(session.get("updatedAt"))
             tool_call_id = as_string(call.get("toolCallId"))
             evidence_key = stable_hash(
