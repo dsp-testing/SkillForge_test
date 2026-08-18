@@ -156,6 +156,8 @@ When `session_store_sql` returns query rows to the agent instead of accepting
 the controller's `outputPath`, materialize exactly those returned rows as a
 JSON array at the action's `outputPath`, preserving nulls and scalar types. The
 lack of a tool-level `outputPath` option is expected and is not a query failure.
+Materialize the full returned page, including the extra pagination sentinel
+row; the controller accepts the bounded rows and advances the cursor.
 Validate that the artifact is readable JSON before recording success:
 
 ```bash
