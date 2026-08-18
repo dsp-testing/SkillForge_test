@@ -28,7 +28,7 @@ Inputs:
 
 - `repository`: exact `owner/name`;
 - `runId`, `runDir`, and exclusive UTC `windowEnd`;
-- `initialBackfillDays`: default `7`;
+- `initialBackfillDays`: default `1`;
 - `overlapHours`: default `24`;
 - `discoveryPageSize`: default `100`;
 - `sessionBatchSize`: default `25`;
@@ -102,11 +102,15 @@ modifying the issue body again; do not replace it with a blocked-run note.
 
 ### 2. Select the incremental window
 
-When the cursor is null, set `windowStart = windowEnd - 7 days`. Otherwise use
-`windowStart = cursor - 24 hours`. Deduplicate the overlap by stable
-`evidenceKey`. Read default-branch repository content through GitHub MCP by
-omitting the optional `ref`; do not require the exact branch name or commit SHA
-before extraction, candidate generation, or a no-publication decision.
+When the cursor is null, set `windowStart = windowEnd - 1 day`. This bounds the
+initial run and lets durable evidence build forward instead of requiring a
+large historical backfill before the first successful state update. Otherwise
+use `windowStart = cursor - 24 hours`; the window still extends through the
+current `windowEnd`, so delayed runs cover the elapsed gap plus overlap.
+Deduplicate the overlap by stable `evidenceKey`. Read default-branch repository
+content through GitHub MCP by omitting the optional `ref`; do not require the
+exact branch name or commit SHA before extraction, candidate generation, or a
+no-publication decision.
 
 Do not advance the issue cursor until extraction, validation, reconciliation,
 the selected publication outcome, and the issue update all succeed.
