@@ -188,18 +188,26 @@ queries concurrently and record results sequentially by exact action ID, never
 by completion order. Record completed successes before terminal failures. The
 controller is the only writer of run-local extraction state.
 
-Before leaving extraction or reporting a terminal outcome, require:
+Immediately before any final response, publication decision, or run-directory
+cleanup, require:
 
 ```bash
 python3 "$SKILL_DIR/scripts/extraction-controller.py" assert-terminal \
   --state "$RUN_DIR/extraction-state.json"
 ```
 
-A run is blocked only when this command reports the controller-recorded
-blocker. Never describe incomplete `running` work as blocked. Once the
-controller is initialized, do not stop for label, target-identity, or
-publication-tool checks while its status remains `running`; continue invoking
-`next` and recording every action outcome until extraction is terminal.
+If this command fails because status is `running`, a final response and cleanup
+are forbidden. Read the pending action IDs from its error, invoke `next`, execute
+the actions, and record every outcome. Repeat until `assert-terminal` succeeds.
+
+A run is `BLOCKED` only when `assert-terminal` succeeds and reports controller
+status `blocked`. Never translate `running`, pending work, elapsed time, action
+volume, or an unrelated helper-shell/display error into `BLOCKED`. Fix or omit
+nonessential display commands and continue from the persisted controller state.
+Do not delete `$RUN_DIR` while status is `running`.
+
+Once the controller is initialized, do not stop for label, target-identity, or
+publication-tool checks while its status remains `running`.
 
 ### 3. Handle irreducible query failures
 
@@ -326,7 +334,9 @@ Discard run evidence when the automation finishes.
 Success requires complete or disclosed-partial extraction, sanitized
 current-window evidence, complete open-and-closed PR reconciliation, no more
 than one PR create/update, and a persistent valid marker in every published
-Forge PR.
+Forge PR. The final report must derive its extraction status from the successful
+`assert-terminal` result. It must never report `BLOCKED` when that command
+reports or fails because of `running`.
 
 Fail explicitly on undisclosed omissions, malformed PR metadata, leakage,
 unsafe proposals, missing required publication tools, or blocked publication.
