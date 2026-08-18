@@ -28,7 +28,7 @@ Inputs:
 
 - `repository`: exact `owner/name`;
 - `runId`, `runDir`, and exclusive UTC `windowEnd`;
-- `windowHours`: default `24`;
+- `windowHours`: default `168` (seven days);
 - `discoveryPageSize`: default `100`;
 - `sessionBatchSize`: default `25`;
 - `toolPageSize`: default `500`;
@@ -228,8 +228,8 @@ python3 "$SKILL_DIR/scripts/aggregate-primitives.py" \
   --out "$RUN_DIR/candidates.json" \
   --repository "$REPOSITORY" \
   --as-of "$WINDOW_END" \
-  --active-days 1 \
-  --stale-days 1 \
+  --active-days 7 \
+  --stale-days 7 \
   --allow-unknown-outcomes
 ```
 
