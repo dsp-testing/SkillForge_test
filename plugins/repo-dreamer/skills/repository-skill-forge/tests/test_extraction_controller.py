@@ -148,6 +148,41 @@ class ExtractionControllerTests(unittest.TestCase):
             self.assertEqual("blocked", state["status"])
             self.assertEqual("other", state["blockers"][-1]["errorKind"])
 
+    def test_artifact_failure_blocks_without_splitting_or_query_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(arguments(run_dir))
+            discovery = controller.next_action(state)
+            assert discovery is not None
+            write_rows(
+                discovery["outputPath"],
+                [
+                    {
+                        "session_id": f"session-{index}",
+                        "updated_at": "2026-08-07T12:00:00Z",
+                    }
+                    for index in range(2)
+                ],
+            )
+            controller.record_success(state, discovery, discovery["outputPath"])
+            metadata = controller.next_action(state)
+            assert metadata is not None
+
+            controller.record_artifact_failure(
+                state,
+                metadata,
+                "session query rows could not be written as JSON",
+            )
+
+            self.assertEqual("blocked", state["status"])
+            self.assertEqual("artifact", state["blockers"][-1]["errorKind"])
+            self.assertEqual(0, state["workCounters"]["failedQueries"])
+            self.assertFalse(
+                any(
+                    item["kind"] in {"split_batch", "reduce_evidence_page"}
+                    for item in state["retryHistory"]
+                )
+            )
+
     def test_discovery_overflow_pages_without_splitting(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(arguments(run_dir))

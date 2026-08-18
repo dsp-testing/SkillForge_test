@@ -152,6 +152,50 @@ With `--fail-on-omission`, any irreducible discovery failure blocks.
 Every query success or failure must be recorded through
 `extraction-controller.py`. Never retry a query manually, alter controller SQL
 ad hoc, or continue after the controller returns a blocked state.
+When `session_store_sql` returns query rows to the agent instead of accepting
+the controller's `outputPath`, materialize exactly those returned rows as a
+JSON array at the action's `outputPath`, preserving nulls and scalar types. The
+lack of a tool-level `outputPath` option is expected and is not a query failure.
+Materialize the full returned page, including the extra pagination sentinel
+row; the controller accepts the bounded rows and advances the cursor.
+Validate that the artifact is readable JSON before recording success:
+
+```bash
+python3 - "$RESULT_PATH" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    rows = json.load(handle)
+if not isinstance(rows, list):
+    raise SystemExit("session query artifact must be a JSON array")
+PY
+
+python3 "$SKILL_DIR/scripts/extraction-controller.py" record-success \
+  --state "$RUN_DIR/extraction-state.json" \
+  --action "$ACTION_ID" \
+  --result "$RESULT_PATH" \
+  --out "$RUN_DIR/extraction-state.next.json"
+mv "$RUN_DIR/extraction-state.next.json" "$RUN_DIR/extraction-state.json"
+```
+
+Do not call `record-failure` when SQL succeeded but result materialization
+failed; that would incorrectly split or omit query work. Retry only the local
+serialization and validation step. If the returned rows cannot be materialized
+without alteration, record the integration blocker once and stop:
+
+```bash
+python3 "$SKILL_DIR/scripts/extraction-controller.py" record-artifact-failure \
+  --state "$RUN_DIR/extraction-state.json" \
+  --action "$ACTION_ID" \
+  --reason "session query rows could not be materialized as JSON" \
+  --out "$RUN_DIR/extraction-state.next.json"
+mv "$RUN_DIR/extraction-state.next.json" "$RUN_DIR/extraction-state.json"
+```
+
+Artifact failures are terminal integration blockers. They never retry, split a
+time partition or session batch, activate fallback, omit evidence, or count as
+failed queries.
 Extract completed discovery partitions before requesting the next unresolved
 partition. This prevents slow or omitted windows from starving metadata,
 evidence analysis, candidate generation, and proposal generation for sessions
