@@ -258,6 +258,7 @@ def next_actions(
             )
             actions = [{
                 "actionId": action_id,
+                "description": action_id,
                 "kind": "discovery",
                 "partitionId": partition["partitionId"],
                 "limit": limits["discoveryPageSize"],
@@ -291,6 +292,7 @@ def next_batch_action(
         action_id = f"metadata-{batch['batchId']}"
         return {
             "actionId": action_id,
+            "description": action_id,
             "kind": "metadata",
             "partitionId": partition["partitionId"],
             "batchId": batch["batchId"],
@@ -306,6 +308,7 @@ def next_batch_action(
         action_id = paged_action_id("refs", batch, page)
         return {
             "actionId": action_id,
+            "description": action_id,
             "kind": "refs",
             "partitionId": partition["partitionId"],
             "batchId": batch["batchId"],
@@ -324,6 +327,7 @@ def next_batch_action(
         action_id = paged_action_id("files", batch, page)
         return {
             "actionId": action_id,
+            "description": action_id,
             "kind": "files",
             "partitionId": partition["partitionId"],
             "batchId": batch["batchId"],
@@ -343,6 +347,7 @@ def next_batch_action(
         action_id = paged_action_id("tools", batch, page)
         return {
             "actionId": action_id,
+            "description": action_id,
             "kind": "tool-calls",
             "partitionId": partition["partitionId"],
             "batchId": batch["batchId"],
