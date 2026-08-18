@@ -167,7 +167,7 @@ def parse_rows(
         ],
         "refs": ["session_id", "ref_type", "ref_value", "turn_index"],
         "files": ["session_id", "file_path", "tool_name", "turn_index"],
-        "tools": [
+        "tool-calls": [
             "session_id",
             "tool_call_id",
             "tool_name",
@@ -223,7 +223,7 @@ def parse_rows(
                     "turn_index": int(turn_index),
                 }
             )
-        elif kind == "tools":
+        elif kind == "tool-calls":
             session_id, tool_call_id, tool_name, remainder = row.split(" | ", 3)
             arguments_json, exit_code, completed_at = remainder.rsplit(" | ", 2)
             json.loads(arguments_json)

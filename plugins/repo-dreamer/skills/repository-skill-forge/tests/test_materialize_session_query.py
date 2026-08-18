@@ -103,7 +103,7 @@ class MaterializeSessionQueryTests(unittest.TestCase):
                         "actions": [
                             {
                                 "actionId": "tools-1",
-                                "kind": "tools",
+                                "kind": "tool-calls",
                                 "sql": sql,
                                 "outputPath": str(output),
                             }
