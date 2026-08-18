@@ -336,7 +336,7 @@ current-window evidence, complete open-and-closed PR reconciliation, no more
 than one PR create/update, and a persistent valid marker in every published
 Forge PR. The final report must derive its extraction status from the successful
 `assert-terminal` result. It must never report `BLOCKED` when that command
-reports or fails because of `running`.
+fails because status is `running`.
 
 Fail explicitly on undisclosed omissions, malformed PR metadata, leakage,
 unsafe proposals, missing required publication tools, or blocked publication.
