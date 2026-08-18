@@ -194,6 +194,26 @@ would incorrectly split or omit query work. Retry the packaged materializer
 once after confirming the tool call completed. If it still cannot find or
 validate the exact result, record the integration blocker once and stop:
 
+If the materializer instead reports `query handoff mismatch`, do not retry or
+record an artifact failure. The action description matched, but the actual SQL
+submitted to `session_store_sql` differed from the controller SQL. Record the
+first-class handoff failure so the controller replaces the affected exact-ID
+batch with smaller queries:
+
+```bash
+python3 "$SKILL_DIR/scripts/extraction-controller.py" record-failure \
+  --state "$RUN_DIR/extraction-state.json" \
+  --action "$ACTION_ID" \
+  --reason "session_store_sql query handoff mismatch" \
+  --error-kind handoff \
+  --out "$RUN_DIR/extraction-state.next.json"
+mv "$RUN_DIR/extraction-state.next.json" "$RUN_DIR/extraction-state.json"
+```
+
+Never accept results from altered SQL. Handoff recovery records the failed
+attempt and produces different, smaller queries rather than repeating the
+same action.
+
 ```bash
 python3 "$SKILL_DIR/scripts/extraction-controller.py" record-artifact-failure \
   --state "$RUN_DIR/extraction-state.json" \

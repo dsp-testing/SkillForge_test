@@ -1079,7 +1079,14 @@ def retry_limit_for(
     action: dict[str, Any],
     error_kind: str,
 ) -> int:
-    if error_kind in {"authorization", "syntax", "schema", "validation", "other"}:
+    if error_kind in {
+        "authorization",
+        "syntax",
+        "schema",
+        "validation",
+        "handoff",
+        "other",
+    }:
         return 0
     if action["kind"] == "discovery" or error_kind == "timeout":
         return 0
@@ -1156,6 +1163,7 @@ def main() -> None:
             "syntax",
             "schema",
             "validation",
+            "handoff",
             "authorization",
             "other",
         ),

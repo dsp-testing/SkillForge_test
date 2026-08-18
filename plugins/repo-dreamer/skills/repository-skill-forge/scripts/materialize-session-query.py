@@ -23,6 +23,10 @@ DETAILED_SQL_RE = re.compile(
 )
 
 
+class QueryHandoffMismatch(ValueError):
+    """The action ID matched, but the submitted SQL differed."""
+
+
 def normalize_sql(sql: str) -> str:
     return " ".join(sql.split())
 
@@ -60,6 +64,7 @@ def load_action(path: str, action_id: str) -> dict[str, Any]:
 def result_content(
     events_root: Path,
     sql: str,
+    action_id: str | None = None,
 ) -> str:
     event_files = sorted(
         events_root.glob("*/events.jsonl"),
@@ -69,8 +74,9 @@ def result_content(
     normalized_sql = normalize_sql(sql)
     exact_call_ids: set[str] = set()
     normalized_call_ids: set[str] = set()
-    for event_file in event_files:
-        for event in read_events(event_file):
+    described_starts: list[tuple[int, int, str, str]] = []
+    for file_index, event_file in enumerate(event_files):
+        for event_index, event in enumerate(read_events(event_file)):
             if event.get("type") != "tool.execution_start":
                 continue
             data = event.get("data")
@@ -78,6 +84,16 @@ def result_content(
                 continue
             arguments = data.get("arguments")
             call_id = data.get("toolCallId")
+            if (
+                action_id is not None
+                and isinstance(arguments, dict)
+                and arguments.get("description") == action_id
+                and isinstance(arguments.get("query"), str)
+                and isinstance(call_id, str)
+            ):
+                described_starts.append(
+                    (file_index, event_index, call_id, arguments["query"])
+                )
             if (
                 data.get("toolName") == "session_store_sql"
                 and isinstance(arguments, dict)
@@ -89,6 +105,17 @@ def result_content(
                     exact_call_ids.add(call_id)
                 elif normalize_sql(query) == normalized_sql:
                     normalized_call_ids.add(call_id)
+
+    if described_starts:
+        _, _, described_call_id, submitted_sql = max(
+            described_starts,
+            key=lambda start: (-start[0], start[1]),
+        )
+        if submitted_sql != sql:
+            raise QueryHandoffMismatch(
+                f"session_store_sql query handoff mismatch for action {action_id}"
+            )
+        exact_call_ids.add(described_call_id)
 
     matching_call_ids = exact_call_ids or normalized_call_ids
     match_groups: list[
@@ -309,7 +336,7 @@ def main() -> None:
     if not isinstance(kind, str):
         raise SystemExit("action is missing kind")
     try:
-        content = result_content(Path(args.events_root), sql)
+        content = result_content(Path(args.events_root), sql, args.action)
         header, raw_rows = table_rows(content)
         rows = parse_rows(kind, header, raw_rows)
         write_json(output_path, rows)

@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = SKILL_DIR / "scripts"
@@ -62,6 +63,43 @@ def write_rows(path: str, rows: list[dict[str, object]]) -> None:
 
 
 class ExtractionControllerTests(unittest.TestCase):
+    def test_handoff_failure_splits_without_artifact_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(arguments(run_dir))
+            partition = state["partitions"][0]
+            batch = controller.make_batches(
+                ["session-1", "session-2"],
+                2,
+                500,
+            )[0]
+            batch["status"] = "tools"
+            partition["batches"] = [batch]
+            action = {
+                "actionId": "tools-batch-1",
+                "kind": "tool-calls",
+                "partitionId": partition["partitionId"],
+                "batchId": batch["batchId"],
+            }
+            state["issuedActions"] = [action]
+
+            with mock.patch.object(
+                controller,
+                "split_tool_batch",
+                return_value=True,
+            ) as split:
+                controller.record_failure(
+                    state,
+                    action,
+                    "session_store_sql query handoff mismatch",
+                    error_kind="handoff",
+                )
+
+            split.assert_called_once()
+            self.assertEqual("running", state["status"])
+            self.assertEqual([], state["blockers"])
+            self.assertIn(action["actionId"], state["handledActionIds"])
+            self.assertEqual(1, state["workCounters"]["failedQueries"])
+
     def test_cli_defaults_to_twenty_five_session_batches(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state_path = Path(run_dir) / "state.json"

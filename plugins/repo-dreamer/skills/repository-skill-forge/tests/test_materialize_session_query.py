@@ -269,6 +269,38 @@ class MaterializeSessionQueryTests(unittest.TestCase):
 
             self.assertEqual(content, materializer.result_content(events_root, sql))
 
+    def test_reports_action_description_sql_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            events_root = Path(temporary)
+            event_dir = events_root / "session-1"
+            event_dir.mkdir()
+            sql = "SELECT id FROM sessions WHERE id IN ('one', 'two')"
+            event = {
+                "type": "tool.execution_start",
+                "data": {
+                    "toolCallId": "call-1",
+                    "toolName": "session_store_sql",
+                    "arguments": {
+                        "description": "metadata-batch-1",
+                        "query": "SELECT id FROM sessions WHERE id IN ('one')",
+                    },
+                },
+            }
+            (event_dir / "events.jsonl").write_text(
+                json.dumps(event) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                materializer.QueryHandoffMismatch,
+                "query handoff mismatch",
+            ):
+                materializer.result_content(
+                    events_root,
+                    sql,
+                    "metadata-batch-1",
+                )
+
     def test_matches_whitespace_normalized_sql(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             events_root = Path(temporary)
