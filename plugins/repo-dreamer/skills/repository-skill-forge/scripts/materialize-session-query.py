@@ -67,7 +67,8 @@ def result_content(
         reverse=True,
     )
     normalized_sql = normalize_sql(sql)
-    matching_call_ids: set[str] = set()
+    exact_call_ids: set[str] = set()
+    normalized_call_ids: set[str] = set()
     for event_file in event_files:
         for event in read_events(event_file):
             if event.get("type") != "tool.execution_start":
@@ -81,14 +82,20 @@ def result_content(
                 data.get("toolName") == "session_store_sql"
                 and isinstance(arguments, dict)
                 and isinstance(arguments.get("query"), str)
-                and normalize_sql(arguments["query"]) == normalized_sql
                 and isinstance(call_id, str)
             ):
-                matching_call_ids.add(call_id)
+                query = arguments["query"]
+                if query == sql:
+                    exact_call_ids.add(call_id)
+                elif normalize_sql(query) == normalized_sql:
+                    normalized_call_ids.add(call_id)
 
-    for event_file in event_files:
-        matches: list[tuple[bool | None, dict[str, Any]]] = []
-        for event in read_events(event_file):
+    matching_call_ids = exact_call_ids or normalized_call_ids
+    match_groups: list[
+        list[tuple[int, int, bool | None, dict[str, Any]]]
+    ] = [[], [], []]
+    for file_index, event_file in enumerate(event_files):
+        for event_index, event in enumerate(read_events(event_file)):
             if event.get("type") != "tool.execution_complete":
                 continue
             data = event.get("data")
@@ -99,7 +106,9 @@ def result_content(
                 continue
             call_id = data.get("toolCallId")
             if isinstance(call_id, str) and call_id in matching_call_ids:
-                matches.append((data.get("success"), result))
+                match_groups[0].append(
+                    (file_index, event_index, data.get("success"), result)
+                )
                 continue
             detailed = result.get("detailedContent")
             sql_match = (
@@ -113,14 +122,29 @@ def result_content(
                 if isinstance(detailed_payload, str)
                 else None
             )
-            if (
+            if rendered_sql == sql:
+                match_groups[1].append(
+                    (file_index, event_index, data.get("success"), result)
+                )
+            elif (
                 isinstance(rendered_sql, str)
                 and normalize_sql(rendered_sql) == normalized_sql
             ):
-                matches.append((data.get("success"), result))
-        if not matches:
-            continue
-        success, result = matches[-1]
+                match_groups[2].append(
+                    (file_index, event_index, data.get("success"), result)
+                )
+
+    selected: tuple[bool | None, dict[str, Any]] | None = None
+    for matches in match_groups:
+        if matches:
+            _, _, success, result = max(
+                matches,
+                key=lambda match: (-match[0], match[1]),
+            )
+            selected = success, result
+            break
+    if selected is not None:
+        success, result = selected
         if success is not True:
             raise ValueError(
                 "matching session_store_sql call was not explicitly successful"
