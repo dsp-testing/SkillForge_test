@@ -139,6 +139,7 @@ def build_tool_calls_query(
     after_session_id: str | None = None,
     after_tool_call_id: str | None = None,
 ) -> str:
+    _ = start, end  # Retained for query-builder interface compatibility.
     ids = sql_values(session_ids)
     cursor = ""
     if after_session_id or after_tool_call_id:

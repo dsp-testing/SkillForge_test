@@ -126,9 +126,10 @@ strategy is:
    repository scope;
 2. fetch exact-ID `sessions` metadata in batches of 100;
 3. fetch bounded `session_refs` and `session_files`;
-4. fetch relevant `tool_requests` directly with pages of 500. Keep tool-level
-   `exit_code` and `completed_at` absent until Session Search exposes
-   materialized completion metadata; do not join the primary query to `events`.
+4. fetch relevant `tool_requests` directly with pages of 500. Preserve
+   tool-level `exit_code` and `completed_at` columns in the artifact schema but
+   return them as `NULL` until Session Search exposes materialized completion
+   metadata; do not join the primary query to `events`.
 
 Tool requests are selected by exact session ID. A session created before the
 incremental window but updated inside it must not be excluded.
