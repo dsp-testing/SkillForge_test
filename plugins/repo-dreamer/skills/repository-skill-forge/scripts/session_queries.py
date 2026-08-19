@@ -96,7 +96,7 @@ WHERE created_at >= TIMESTAMP '{sql_literal(start)}'
   AND created_at < TIMESTAMP '{sql_literal(end)}'
   AND session_id IN ({ids}){after}
 ORDER BY session_id, turn_index, ref_type, ref_value
-LIMIT {limit + 1}"""
+LIMIT {limit}"""
 
 
 def build_files_query(
@@ -127,7 +127,7 @@ def build_files_query(
 SELECT session_id, file_path, tool_name, turn_index
 FROM selected_files{after}
 ORDER BY session_id, file_path, tool_name
-LIMIT {limit + 1}"""
+LIMIT {limit}"""
 
 
 def build_tool_calls_query(
@@ -156,7 +156,7 @@ FROM tool_requests tr
 WHERE tr.session_id IN ({ids})
   AND lower(tr.name) IN ({tools}){cursor}
 ORDER BY tr.session_id, tr.tool_call_id
-LIMIT {limit + 1}"""
+LIMIT {limit}"""
 
 
 def build_event_tool_calls_query(
@@ -182,7 +182,7 @@ def build_event_tool_calls_query(
       AND e.type = 'tool.execution_start'
       AND lower(e.tool_start_name) IN ({tools}){cursor}
     ORDER BY e.tool_start_call_id
-    LIMIT {limit + 1}
+    LIMIT {limit}
 ),
 completion_events AS (
     SELECT session_id, tool_complete_call_id, exit_code, completed_at

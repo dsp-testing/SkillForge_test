@@ -63,6 +63,43 @@ def write_rows(path: str, rows: list[dict[str, object]]) -> None:
 
 
 class ExtractionControllerTests(unittest.TestCase):
+    def test_full_evidence_page_continues_without_sentinel_row(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(arguments(run_dir, tool_page_size=2))
+            partition = state["partitions"][0]
+            batch = controller.make_batches(["session-1"], 1, 2)[0]
+            batch["status"] = "refs"
+            batch["sourceStart"] = "2026-08-01T00:00:00Z"
+            batch["sourceEnd"] = "2026-08-02T00:00:00Z"
+            partition["batches"] = [batch]
+
+            first = controller.next_action(state)
+            assert first is not None
+            write_rows(
+                first["outputPath"],
+                [
+                    {
+                        "session_id": "session-1",
+                        "ref_type": "pr",
+                        "ref_value": str(index),
+                        "turn_index": index,
+                    }
+                    for index in range(2)
+                ],
+            )
+            controller.record_success(state, first, first["outputPath"])
+
+            second = controller.next_action(state)
+            assert second is not None
+            self.assertEqual("refs", second["kind"])
+            self.assertIn("LIMIT 2", second["sql"])
+            self.assertNotIn("LIMIT 3", second["sql"])
+            self.assertEqual("1", batch["refsCursor"]["refValue"])
+
+            write_rows(second["outputPath"], [])
+            controller.record_success(state, second, second["outputPath"])
+            self.assertEqual("files", batch["status"])
+
     def test_handoff_failure_splits_without_artifact_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = controller.initialize(arguments(run_dir))
@@ -100,7 +137,7 @@ class ExtractionControllerTests(unittest.TestCase):
             self.assertIn(action["actionId"], state["handledActionIds"])
             self.assertEqual(1, state["workCounters"]["failedQueries"])
 
-    def test_cli_defaults_to_twenty_five_session_batches(self) -> None:
+    def test_cli_uses_fast_safe_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state_path = Path(run_dir) / "state.json"
             result = subprocess.run(
@@ -126,11 +163,26 @@ class ExtractionControllerTests(unittest.TestCase):
 
             self.assertEqual("", result.stderr)
             self.assertEqual(0, result.returncode)
+            limits = json.loads(state_path.read_text(encoding="utf-8"))["limits"]
+            self.assertEqual(500, limits["discoveryPageSize"])
+            self.assertEqual(25, limits["sessionBatchSize"])
+            self.assertEqual(1000, limits["toolPageSize"])
+
+    def test_checkpoint_failure_is_terminal_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(arguments(run_dir))
+
+            controller.record_checkpoint_failure(
+                state,
+                "completed batch contains blocking leakage",
+            )
+
+            self.assertEqual("blocked", state["status"])
+            self.assertEqual([], state["issuedActions"])
+            self.assertEqual("batch-checkpoint", state["blockers"][0]["kind"])
             self.assertEqual(
-                25,
-                json.loads(state_path.read_text(encoding="utf-8"))["limits"][
-                    "sessionBatchSize"
-                ],
+                "completed batch contains blocking leakage",
+                state["blockers"][0]["reason"],
             )
 
     def test_assert_terminal_rejects_running_state(self) -> None:
