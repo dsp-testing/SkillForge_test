@@ -58,7 +58,7 @@ class MaterializeSessionQueryTests(unittest.TestCase):
         self.assertIn("NULL AS exit_code", query)
         self.assertIn("NULL AS completed_at", query)
         self.assertIn("FROM tool_requests tr", query)
-        self.assertIn("LIMIT 501", query)
+        self.assertIn("LIMIT 500", query)
 
     def test_missing_tool_completion_uses_session_timestamp_and_unknown_outcome(
         self,

@@ -470,14 +470,19 @@ def validate_result(
         raise ValueError("query result must be a JSON array")
     if len(rows) > state["limits"]["maxRows"]:
         raise OverflowError("row_limit_exceeded")
+    maximum_rows = (
+        action["limit"] + 1
+        if action["kind"] in {"discovery", "metadata"}
+        else action["limit"]
+    )
     if action["kind"] in {
         "discovery",
         "metadata",
         "refs",
         "files",
         "tool-calls",
-    } and len(rows) > action["limit"] + 1:
-        raise ValueError("query returned more rows than its limit sentinel")
+    } and len(rows) > maximum_rows:
+        raise ValueError("query returned more rows than its bounded limit")
     return rows, artifact_bytes
 
 
@@ -622,7 +627,7 @@ def record_success(
             "tool-calls": "toolArtifacts",
         }[action["kind"]]
         batch[artifact_key].append(accepted_path)
-    if len(rows) > action["limit"]:
+    if len(rows) >= action["limit"]:
         last = accepted[-1]
         if action["kind"] == "refs":
             batch["refsCursor"] = {
@@ -1059,6 +1064,19 @@ def record_artifact_failure(
     validate_state_invariants(state)
 
 
+def record_checkpoint_failure(state: dict[str, Any], reason: str) -> None:
+    state["issuedActions"] = []
+    state.setdefault("blockers", []).append(
+        {
+            "kind": "batch-checkpoint",
+            "errorKind": "artifact",
+            "reason": reason,
+        }
+    )
+    state["status"] = "blocked"
+    validate_state_invariants(state)
+
+
 def classify_error(reason: str) -> str:
     normalized = reason.lower()
     if any(token in normalized for token in ("unauthorized", "forbidden", "permission", "access denied")):
@@ -1152,9 +1170,9 @@ def main() -> None:
     init.add_argument("--start", required=True)
     init.add_argument("--end", required=True)
     init.add_argument("--run-dir", required=True)
-    init.add_argument("--discovery-page-size", type=int, default=100)
+    init.add_argument("--discovery-page-size", type=int, default=500)
     init.add_argument("--session-batch-size", type=int, default=25)
-    init.add_argument("--tool-page-size", type=int, default=500)
+    init.add_argument("--tool-page-size", type=int, default=1000)
     init.add_argument("--max-rows", type=int, default=1000)
     init.add_argument("--max-artifact-bytes", type=int, default=10_000_000)
     init.add_argument("--min-window-minutes", type=int, default=15)
@@ -1210,6 +1228,11 @@ def main() -> None:
     artifact_failure.add_argument("--reason", required=True)
     artifact_failure.add_argument("--out", required=True)
 
+    checkpoint_failure = subparsers.add_parser("record-checkpoint-failure")
+    checkpoint_failure.add_argument("--state", required=True)
+    checkpoint_failure.add_argument("--reason", required=True)
+    checkpoint_failure.add_argument("--out", required=True)
+
     args = parser.parse_args()
     try:
         if args.command == "init":
@@ -1257,6 +1280,10 @@ def main() -> None:
                 write_json(args.out, summary)
             else:
                 print(json.dumps(summary, indent=2))
+            return
+        if args.command == "record-checkpoint-failure":
+            record_checkpoint_failure(state, args.reason)
+            write_json(args.out, state)
             return
         action = load_action(args.action, state)
         if args.command == "record-success":

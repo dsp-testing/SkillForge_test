@@ -29,9 +29,9 @@ Inputs:
 - `repository`: exact `owner/name`;
 - `runId`, `runDir`, and exclusive UTC `windowEnd`;
 - `windowHours`: default `168` (seven days);
-- `discoveryPageSize`: default `100`;
+- `discoveryPageSize`: default `500`;
 - `sessionBatchSize`: default `25`;
-- `toolPageSize`: default `500`;
+- `toolPageSize`: default `1000`;
 - `maxRows`: default `1000`;
 - `maxArtifactBytes`: default `10000000`;
 - `maxQueryRetries`: default `1` retry for non-timeout transient failures;
@@ -87,9 +87,9 @@ strategy is:
 1. select sessions updated inside the fixed window, returning only `id` and
    `updated_at`, ordered by `(updated_at, id)` for keyset pagination, with an
    exact SQL repository predicate in addition to mandatory tool-level scope;
-2. fetch exact-ID `sessions` metadata in batches of 100;
+2. fetch exact-ID `sessions` metadata in batches of 25;
 3. fetch bounded `session_refs` and `session_files`;
-4. fetch relevant `tool_requests` directly with pages of 500. Preserve
+4. fetch relevant `tool_requests` directly with pages of 1000. Preserve
    tool-level `exit_code` and `completed_at` artifact columns as `NULL` until
    Session Search exposes materialized completion metadata; do not join the
    primary query to `events`.
@@ -188,6 +188,37 @@ queries concurrently and record results sequentially by exact action ID, never
 by completion order. Record completed successes before terminal failures. The
 controller is the only writer of run-local extraction state.
 
+After recording every action batch, immediately normalize, derive, sanitize,
+and merge every newly completed extraction batch:
+
+```bash
+python3 "$SKILL_DIR/scripts/checkpoint-completed-batches.py" \
+  --state "$RUN_DIR/extraction-state.json" \
+  --ledger "$RUN_DIR/primitives.sanitized.json" \
+  --main-branch "$DEFAULT_BRANCH" \
+  --out "$RUN_DIR/checkpoint-summary.json"
+```
+
+The checkpoint helper is idempotent by batch ID. It atomically promotes the
+sanitized run ledger before deleting resolved raw query, normalized, and
+unsanitized artifacts. Invoke it again after `next` first returns a terminal
+controller status so final extraction coverage is attached to the ledger.
+
+If checkpointing fails, record that failure through the controller before
+stopping:
+
+```bash
+python3 "$SKILL_DIR/scripts/extraction-controller.py" record-checkpoint-failure \
+  --state "$RUN_DIR/extraction-state.json" \
+  --reason "completed batch could not be normalized and sanitized" \
+  --out "$RUN_DIR/extraction-state.next.json"
+mv "$RUN_DIR/extraction-state.next.json" "$RUN_DIR/extraction-state.json"
+```
+
+Do not continue extraction after a checkpoint failure. The controller must
+reach terminal `blocked` status so the failure cannot be mistaken for an
+unfinished `running` extraction.
+
 Immediately before any final response, publication decision, or run-directory
 cleanup, require:
 
@@ -225,12 +256,12 @@ range and post-discovery failures by repository-salted session hashes. Use
 `--fail-on-omission` for fail-closed behavior. Partial evidence must remain
 explicit throughout proposal validation and publication.
 
-### 4. Normalize, sanitize, and aggregate this run
+### 4. Aggregate the progressively sanitized run
 
-Normalize completed batches, derive primitives, sanitize them, and checkpoint
-the run ledger idempotently by `evidenceKey`. Pass extraction state to
-`merge-sanitized-primitives.py` so complete or partial coverage follows the
-evidence into candidate generation.
+After terminal assertion, require `$RUN_DIR/primitives.sanitized.json`. It
+already contains every completed batch and the controller's complete or
+disclosed-partial coverage. Do not repeat normalization or sanitization at the
+end of extraction.
 
 Raw commands and source content remain ephemeral. `aggregate-primitives.py`
 deduplicates only the current run and emits patterns and candidates; it does
@@ -238,7 +269,7 @@ not read or write durable Forge state:
 
 ```bash
 python3 "$SKILL_DIR/scripts/aggregate-primitives.py" \
-  --in "$RUN_DIR/sanitized-primitives.json" \
+  --in "$RUN_DIR/primitives.sanitized.json" \
   --out "$RUN_DIR/candidates.json" \
   --repository "$REPOSITORY" \
   --as-of "$WINDOW_END" \
@@ -352,6 +383,10 @@ tool-call, output, context, or automation limit.
   fast primary queries, and explicit partial omissions.
 - `scripts/materialize-session-query.py`: exact current-session result
   materialization into controller JSON artifacts.
+- `scripts/checkpoint-completed-batches.py`: idempotent progressive
+  normalization, sanitization, ledger promotion, and raw-artifact cleanup.
+- `scripts/merge-sanitized-primitives.py`: sanitized batch-ledger merge and
+  terminal extraction coverage attachment.
 - `scripts/aggregate-primitives.py`: current-run deduplication and scoring.
 - `scripts/proposal-ledger.py`: PR marker parsing, cataloging, reconciliation,
   and one-mutation selection.

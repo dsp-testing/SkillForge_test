@@ -99,6 +99,30 @@ def merge(
     }
 
 
+def apply_extraction_coverage(
+    result: dict[str, Any],
+    extraction_state: dict[str, Any],
+) -> dict[str, Any]:
+    if extraction_state.get("status") not in {"complete", "partial"}:
+        raise ValueError("extraction state is not publishable")
+    extraction_coverage = extraction_state.get("coverage")
+    if not isinstance(extraction_coverage, dict):
+        raise ValueError("extraction state is missing coverage")
+    if result.get("scope") is None:
+        scope = extraction_state.get("scope")
+        if not isinstance(scope, dict):
+            raise ValueError("extraction state is missing scope")
+        result["scope"] = scope
+    result["coverage"].update(
+        {
+            "partial": extraction_state.get("status") == "partial",
+            **extraction_coverage,
+            "omittedUnits": extraction_state.get("omittedUnits", []),
+        }
+    )
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -106,7 +130,7 @@ def main() -> None:
         action="append",
         nargs=2,
         metavar=("BATCH_ID", "PATH"),
-        required=True,
+        default=[],
     )
     parser.add_argument("--ledger-in")
     parser.add_argument("--extraction-state")
@@ -117,6 +141,8 @@ def main() -> None:
         ledger = read_json(args.ledger_in)
         if not isinstance(ledger, dict):
             raise SystemExit("ledger input must be a JSON object")
+    if not args.batch and ledger is None and not args.extraction_state:
+        raise SystemExit("provide --batch, --ledger-in, or --extraction-state")
     documents = []
     for batch_id, path in args.batch:
         document = read_json(path)
@@ -131,18 +157,10 @@ def main() -> None:
         extraction_state = read_json(args.extraction_state)
         if not isinstance(extraction_state, dict):
             raise SystemExit("extraction state must be a JSON object")
-        if extraction_state.get("status") not in {"complete", "partial"}:
-            raise SystemExit("extraction state is not publishable")
-        extraction_coverage = extraction_state.get("coverage")
-        if not isinstance(extraction_coverage, dict):
-            raise SystemExit("extraction state is missing coverage")
-        result["coverage"].update(
-            {
-                "partial": extraction_state.get("status") == "partial",
-                **extraction_coverage,
-                "omittedUnits": extraction_state.get("omittedUnits", []),
-            }
-        )
+        try:
+            apply_extraction_coverage(result, extraction_state)
+        except ValueError as error:
+            raise SystemExit(str(error)) from error
     write_json(args.out, result)
 
 
