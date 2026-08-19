@@ -6,11 +6,11 @@ Review the generated refactoring patch, repository instructions, baseline
 behavior, and validation results. Review the artifact rather than the authoring
 conversation.
 
-Return:
+Return JSON. `decision` must be exactly one of `accept`, `revise`, or `reject`.
 
 ```json
 {
-  "decision": "accept | revise | reject",
+  "decision": "accept",
   "behaviorPreserved": true,
   "singleConcern": true,
   "simplificationIsReal": true,

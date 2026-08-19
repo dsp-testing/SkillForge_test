@@ -30,7 +30,8 @@ Use this skill only when:
 - repository instructions and validation commands are available;
 - the repository has tests covering the selected behavior, or characterization
   tests can be added before the refactor;
-- GitHub pull requests can be read and created through approved tools.
+- GitHub pull requests can be read and created through approved GitHub MCP
+  tools.
 
 Do not modify generated code, vendored code, lockfiles, snapshots, migrations,
 or code owned by an active unmerged refactoring PR.
@@ -48,8 +49,9 @@ Inputs:
 - `dryRun`: default `false`.
 
 The POC is stateless. Before selecting work, search open and recently closed
-pull requests for prior Refactoring Dream proposals and semantically related
-refactors. Do not repeat a rejected or already represented proposal.
+pull request bodies for the literal `repository-refactoring-dream:v1` marker.
+Also search for semantically related refactors that predate or omit the marker.
+Do not repeat a rejected or already represented proposal.
 
 ## Policy
 
@@ -199,7 +201,7 @@ Otherwise create one PR containing:
   size removed;
 - **Risk:** remaining uncertainty and easy rollback instructions.
 
-Include this marker exactly once:
+Include this marker exactly once in the pull request body:
 
 ```text
 repository-refactoring-dream:v1
