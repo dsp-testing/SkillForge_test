@@ -293,13 +293,13 @@ Cluster eligible candidates by repository subject. Assign a stable
 Assign deterministic non-negative `rank` values.
 
 Validate and independently review every proposal. Compare it with repository
-skills and the complete Forge PR catalog. Every promoted proposal body must
-contain the exact marker produced by:
+skills and the complete Forge PR catalog. Store each promoted proposal's marker
+with that proposal rather than in a shared run-level file:
 
 ```bash
 python3 "$SKILL_DIR/scripts/proposal-ledger.py" marker \
   --proposal "$PROPOSAL_JSON" \
-  --out "$RUN_DIR/proposal-marker.md"
+  --out "$RUN_DIR/proposals/$PROPOSAL_KEY/proposal-marker.md"
 ```
 
 The marker is persistent PR metadata. Do not edit or remove it when updating a
@@ -316,6 +316,10 @@ python3 "$SKILL_DIR/scripts/proposal-ledger.py" select \
   --catalog "$RUN_DIR/proposal-catalog.json" \
   --out "$RUN_DIR/proposal-selection.json"
 ```
+
+The selected entry contains `selection.marker`, generated directly from the
+selected proposal. Pass that exact value unchanged in the PR body; never use a
+shared marker file or a marker belonging to another proposal.
 
 Reconciliation rules:
 
@@ -346,6 +350,11 @@ TARGET_SHA="$(
 
 If no proposal is selected, missing target identity must not block the run.
 If selected and target identity cannot be resolved, block before publication.
+For a create action, stage only the selected proposal. Before copying, reject
+symlinks in its source tree, every existing destination path component, and
+every existing destination entry mapped from a selected source entry. Compare
+the pending checkout paths with the exact selected source-file manifest and
+block on any additional path.
 After publication, apply `skills-forge` when the label exists and the available
 GitHub tools support it. Label lookup, creation, or application failure is
 non-blocking because the persistent marker is the authoritative Forge identity.
