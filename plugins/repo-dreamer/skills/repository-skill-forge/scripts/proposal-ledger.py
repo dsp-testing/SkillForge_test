@@ -218,6 +218,11 @@ def select(
         ),
         None,
     )
+    if selected is not None:
+        selected = {
+            **selected,
+            "marker": render_marker(selected["proposal"]),
+        }
     return {
         "selection": selected,
         "mutationCount": 1 if selected else 0,

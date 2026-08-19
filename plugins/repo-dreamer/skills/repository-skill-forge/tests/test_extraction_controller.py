@@ -137,6 +137,35 @@ class ExtractionControllerTests(unittest.TestCase):
             self.assertIn(action["actionId"], state["handledActionIds"])
             self.assertEqual(1, state["workCounters"]["failedQueries"])
 
+    def test_single_session_tool_overflow_reduces_page_size(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = controller.initialize(arguments(run_dir, tool_page_size=8))
+            partition = state["partitions"][0]
+            batch = controller.make_batches(["session-1"], 1, 8)[0]
+            batch["status"] = "tools"
+            partition["batches"] = [batch]
+            action = {
+                "actionId": "tools-batch-1",
+                "kind": "tool-calls",
+                "partitionId": partition["partitionId"],
+                "batchId": batch["batchId"],
+            }
+            state["issuedActions"] = [action]
+
+            controller.record_failure(
+                state,
+                action,
+                "row_limit_exceeded",
+                count_attempt=False,
+                allow_retry=False,
+            )
+
+            self.assertEqual("running", state["status"])
+            self.assertEqual(4, batch["pageSize"])
+            self.assertEqual([], state["blockers"])
+            self.assertEqual([], state["omittedUnits"])
+            self.assertEqual("reduce_evidence_page", state["retryHistory"][-1]["kind"])
+
     def test_cli_uses_fast_safe_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state_path = Path(run_dir) / "state.json"

@@ -1013,11 +1013,15 @@ def record_failure(
         recovered = split_partition(state, partition, reason)
     else:
         batch = find_batch(partition, action["batchId"])
-        recovered = (
-            split_tool_batch(state, partition, batch, reason)
-            if batch["status"] == "tools"
-            else split_batch(state, partition, batch, reason)
-        )
+        if batch["status"] == "tools":
+            recovered = split_tool_batch(
+                state,
+                partition,
+                batch,
+                reason,
+            ) or split_batch(state, partition, batch, reason)
+        else:
+            recovered = split_batch(state, partition, batch, reason)
     if recovered:
         state["handledActionIds"].append(action["actionId"])
         return

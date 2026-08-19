@@ -265,6 +265,10 @@ class ProposalMarkerTests(unittest.TestCase):
 
         self.assertEqual(1, result["mutationCount"])
         self.assertEqual("first", result["selection"]["proposal"]["proposalKey"])
+        self.assertEqual(
+            ledger.render_marker(proposal(key="first", rank=1)),
+            result["selection"]["marker"],
+        )
 
     def test_selection_rejects_invalid_rank(self) -> None:
         invalid = proposal()
