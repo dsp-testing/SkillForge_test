@@ -28,7 +28,7 @@ Inputs:
 
 - `repository`: exact `owner/name`;
 - `runId`, `runDir`, and exclusive UTC `windowEnd`;
-- `windowHours`: default `168` (seven days);
+- `windowHours`: default `96` (four days);
 - `discoveryPageSize`: default `500`;
 - `sessionBatchSize`: default `25`;
 - `toolPageSize`: default `1000`;
