@@ -22,7 +22,7 @@ TOKEN_PATTERNS = (
         "assigned_secret",
         re.compile(
             r"""
-            \b(?:password|passwd|token|secret|api[_-]?key)\s*[:=]\s*
+            \b(?:password|passwd|token|secret|api[_-]?key|aws_secret_access_key)\s*[:=]\s*
             (?:
                 (?P<quote>['"])(?!<|\$\{|\$[A-Z_]+)[^'"\r\n]{12,}(?P=quote)
                 |
