@@ -31,6 +31,7 @@ class SanitizeEvidenceTests(unittest.TestCase):
         values = [
             'token="abcdefghijklmnop"',
             "api_key=abcDEF1234567890",
+            "aws_secret_access_key=abcDEF1234567890",
         ]
 
         for value in values:

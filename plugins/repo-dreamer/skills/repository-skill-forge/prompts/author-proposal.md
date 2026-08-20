@@ -49,5 +49,9 @@ For a promoted proposal:
 - keep unrelated subjects as separate proposals;
 - do not modify the target checkout or publish the proposal.
 
+Do not author the final pull request body in this step. After selection and
+target-SHA resolution, use `author-pr-body.md` to write the standalone body for
+the one selected proposal.
+
 For a hold decision, write no `SKILL.md` and state the exact missing evidence or
 safety condition.

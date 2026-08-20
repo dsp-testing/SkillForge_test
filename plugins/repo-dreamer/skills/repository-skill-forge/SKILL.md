@@ -350,18 +350,67 @@ TARGET_SHA="$(
 
 If no proposal is selected, missing target identity must not block the run.
 If selected and target identity cannot be resolved, block before publication.
+
+For the selected proposal only, use `prompts/author-pr-body.md` to write a
+standalone `$RUN_DIR/pr-body.md`. It must replace rather than append the host
+repository's pull request template. Put the plain-language explanation first,
+move Forge metadata into the trailing details block, and append the exact
+`selection.marker` as the final content.
+
+Validate the rendered body before modifying the checkout:
+
+```bash
+PYTHONPYCACHEPREFIX="$RUN_DIR/pycache" python3 "$SKILL_DIR/scripts/validate-publication.py" body \
+  --selection "$RUN_DIR/proposal-selection.json" \
+  --body "$RUN_DIR/pr-body.md" \
+  --target-sha "$TARGET_SHA" \
+  --json
+```
+
+Then review the final body against `prompts/review-pr-body.md`. Any validation
+or review finding blocks publication. Do not add with/without-skill evaluation
+claims in this workflow.
+
+Set `$SELECTED_PROPOSAL_DIR` to the selected run-local skill directory and
+`$SKILL_PATH` to its repository-relative destination before the checkout
+validation steps.
+
 For a create action, stage only the selected proposal. Before copying, reject
 symlinks in its source tree, every existing destination path component, and
 every existing destination entry mapped from a selected source entry. Compare
 the pending checkout paths with the exact selected source-file manifest and
 block on any additional path.
+
+Require a clean checkout through the packaged validator before copying:
+
+```bash
+PYTHONPYCACHEPREFIX="$RUN_DIR/pycache" python3 "$SKILL_DIR/scripts/validate-publication.py" clean \
+  --repository "$REPOSITORY_DIR" \
+  --json
+```
+
+After copying the selected proposal, validate that every changed path and byte
+matches that source tree and that no selected text contains secret-shaped,
+home-path, or raw session metadata:
+
+```bash
+PYTHONPYCACHEPREFIX="$RUN_DIR/pycache" python3 "$SKILL_DIR/scripts/validate-publication.py" checkout \
+  --repository "$REPOSITORY_DIR" \
+  --source "$SELECTED_PROPOSAL_DIR" \
+  --destination "$SKILL_PATH" \
+  --json
+```
+
 After publication, apply `skills-forge` when the label exists and the available
 GitHub tools support it. Label lookup, creation, or application failure is
 non-blocking because the persistent marker is the authoritative Forge identity.
 
-The PR body includes the marker, proposal identity, candidate IDs, confidence,
-fixed evidence window, target SHA, validation, review findings, and the
-unknown trusted-user-diversity limitation. For a partial run, also disclose
+Read the validated `$RUN_DIR/pr-body.md` verbatim and pass its exact contents as
+the complete PR body. Do not summarize, rewrite, preserve, or append the host
+template. The trailing
+Forge details include the marker, proposal identity, candidate IDs, confidence,
+fixed evidence window, target SHA, validation, review findings, and the unknown
+trusted-user-diversity limitation. For a partial run, they also disclose
 discovered/completed counts, discovery completeness, known or unknown coverage,
 omission count and kinds, and fallback status. Never describe partial evidence
 as complete.
@@ -399,8 +448,12 @@ tool-call, output, context, or automation limit.
 - `scripts/aggregate-primitives.py`: current-run deduplication and scoring.
 - `scripts/proposal-ledger.py`: PR marker parsing, cataloging, reconciliation,
   and one-mutation selection.
+- `scripts/validate-publication.py`: final PR-body, clean-checkout,
+  selected-path, content-equality, and leakage validation.
 - `scripts/session_queries.py`: materialized session queries and opt-in
   tool-event fallback SQL.
+- `prompts/author-pr-body.md`: plain-language PR body contract.
+- `prompts/review-pr-body.md`: final PR body evidence and safety review.
 - `assets/schemas.json`: extraction, candidate, and PR metadata contracts.
 
 **Abstraction level:** strategic
