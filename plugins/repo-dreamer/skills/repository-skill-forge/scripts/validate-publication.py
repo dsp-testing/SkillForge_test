@@ -30,19 +30,27 @@ EXAMPLE_LABELS = (
     "**With these instructions**",
 )
 DETAIL_LABELS = (
-    "Proposal key:",
-    "Proposal version:",
-    "Decision:",
-    "Candidate IDs:",
-    "Confidence:",
-    "Evidence window:",
-    "Repository sources:",
-    "Target SHA:",
-    "Extraction:",
-    "Validation:",
-    "Review findings:",
-    "Trusted-user diversity: unknown",
+    "Proposal key",
+    "Proposal version",
+    "Decision",
+    "Candidate IDs",
+    "Confidence",
+    "Evidence window",
+    "Repository sources",
+    "Target SHA",
+    "Extraction",
+    "Validation",
+    "Review findings",
+    "Trusted-user diversity",
 )
+PARTIAL_DETAIL_LABELS = (
+    "Discovery complete",
+    "Sessions",
+    "Coverage",
+    "Omissions",
+    "Tool-event fallback",
+)
+DETAIL_BULLET_RE = re.compile(r"^-\s+(?P<label>[^:\n]+):\s*(?P<value>.*)$")
 OPENING_JARGON_RE = re.compile(
     r"\b(?:forge(?:-generated)?|skills?|guardrails?|proposals?|candidates?)\b",
     re.IGNORECASE,
@@ -71,17 +79,28 @@ FABRICATED_OUTPUT_PATTERNS = (
     re.compile(r"\bI(?:'ve| have)\s+committed\b", re.IGNORECASE),
 )
 RAW_SESSION_KEYS = {
-    "session_id",
     "sessionid",
-    "agent_name",
     "agentname",
     "repository",
     "branch",
-    "created_at",
     "createdat",
-    "updated_at",
     "updatedat",
 }
+RAW_SESSION_KEY_RE = re.compile(
+    r"""(?ix)
+    ["']?
+    (?P<key>
+        session[_-]?id
+        |agent[_-]?name
+        |repository
+        |branch
+        |created[_-]?at
+        |updated[_-]?at
+    )
+    ["']?
+    \s*:
+    """
+)
 
 
 def load_sanitizer() -> Any:
@@ -139,19 +158,79 @@ def sensitive_findings(value: str) -> list[str]:
     return findings
 
 
+def canonical_key(value: Any) -> str:
+    return re.sub(r"[_-]", "", str(value)).lower()
+
+
 def contains_raw_session_rows(value: Any) -> bool:
     if isinstance(value, dict):
-        keys = {str(key).replace("-", "_").lower() for key in value}
-        normalized = {key.replace("_", "") for key in keys}
-        if (
-            ("session_id" in keys or "sessionid" in normalized)
-            and len((keys | normalized) & RAW_SESSION_KEYS) >= 4
-        ):
+        keys = {canonical_key(key) for key in value}
+        if "sessionid" in keys and len(keys & RAW_SESSION_KEYS) >= 4:
             return True
         return any(contains_raw_session_rows(item) for item in value.values())
     if isinstance(value, list):
         return any(contains_raw_session_rows(item) for item in value)
     return False
+
+
+def contains_raw_session_content(content: str) -> bool:
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"[\[{]", content):
+        try:
+            value, _end = decoder.raw_decode(content[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if contains_raw_session_rows(value):
+            return True
+    keys = {
+        canonical_key(match.group("key"))
+        for match in RAW_SESSION_KEY_RE.finditer(content)
+    }
+    return "sessionid" in keys and len(keys & RAW_SESSION_KEYS) >= 4
+
+
+def parse_detail_bullets(details: str) -> tuple[dict[str, str], list[str]]:
+    values: dict[str, str] = {}
+    errors: list[str] = []
+    for line in details.splitlines():
+        match = DETAIL_BULLET_RE.fullmatch(line.strip())
+        if match is None:
+            continue
+        label = match.group("label").strip()
+        value = match.group("value").strip()
+        if label in values:
+            errors.append(f"Forge details contain duplicate {label!r} bullets")
+            continue
+        values[label] = value
+    return values, errors
+
+
+def expect_detail(
+    values: dict[str, str],
+    label: str,
+    expected: str,
+    errors: list[str],
+) -> None:
+    actual = values.get(label)
+    if actual is None:
+        errors.append(f"Forge details are missing {label}:")
+    elif actual != expected:
+        errors.append(f"Forge details {label}: must equal {expected!r}")
+
+
+def coverage_text(extraction: dict[str, Any]) -> str | None:
+    status = extraction.get("sessionCoverageStatus")
+    coverage = extraction.get("sessionCoverage")
+    if status == "unknown" and coverage is None:
+        return "unknown"
+    if (
+        status == "known"
+        and isinstance(coverage, (int, float))
+        and not isinstance(coverage, bool)
+        and 0 <= coverage <= 1
+    ):
+        return f"{coverage * 100:.1f}%"
+    return None
 
 
 def validate_body(
@@ -247,62 +326,134 @@ def validate_body(
     if len(re.findall(r"\b[\w'-]+\b", visible)) > 500:
         errors.append("PR body user-facing content exceeds 500 words")
 
+    detail_values, detail_errors = parse_detail_bullets(details)
+    errors.extend(detail_errors)
     for label in DETAIL_LABELS:
-        if label not in details:
-            errors.append(f"Forge details are missing {label}")
-    for field in ("proposalKey", "proposalVersion", "decision"):
+        if label not in detail_values:
+            errors.append(f"Forge details are missing {label}:")
+        elif not detail_values[label]:
+            errors.append(f"Forge details {label}: must not be empty")
+
+    identity_fields = (
+        ("Proposal key", "proposalKey"),
+        ("Proposal version", "proposalVersion"),
+        ("Decision", "decision"),
+    )
+    for label, field in identity_fields:
         value = proposal.get(field)
-        if not isinstance(value, str) or value not in details:
-            errors.append(f"Forge details do not contain the selected {field}")
+        if not isinstance(value, str) or not value:
+            errors.append(f"selected proposal {field} is invalid")
+        else:
+            expect_detail(detail_values, label, f"`{value}`", errors)
+
     candidate_ids = proposal.get("candidateIds")
-    if not isinstance(candidate_ids, list) or not candidate_ids:
+    if (
+        not isinstance(candidate_ids, list)
+        or not candidate_ids
+        or any(not isinstance(candidate_id, str) or not candidate_id for candidate_id in candidate_ids)
+    ):
         errors.append("selected proposal candidateIds are invalid")
     else:
-        for candidate_id in candidate_ids:
-            if not isinstance(candidate_id, str) or candidate_id not in details:
-                errors.append("Forge details do not contain every selected candidate ID")
-                break
-    if f"`{target_sha}`" not in details:
-        errors.append("Forge details do not contain the exact target SHA")
+        expected_ids = ", ".join(f"`{candidate_id}`" for candidate_id in sorted(candidate_ids))
+        expect_detail(detail_values, "Candidate IDs", expected_ids, errors)
+    expect_detail(detail_values, "Target SHA", f"`{target_sha}`", errors)
+    expect_detail(
+        detail_values,
+        "Trusted-user diversity",
+        "unknown",
+        errors,
+    )
 
     extraction = proposal.get("extraction")
     if not isinstance(extraction, dict):
         errors.append("selected proposal extraction coverage is missing")
     else:
         status_value = extraction.get("status")
-        if f"Extraction: {status_value}" not in details:
-            errors.append("Forge details extraction status does not match the proposal")
+        if status_value not in {"complete", "partial"}:
+            errors.append("selected proposal extraction status is invalid")
+        else:
+            expect_detail(detail_values, "Extraction", status_value, errors)
         if status_value == "partial":
-            partial_labels = (
-                "Discovery complete:",
-                "Sessions:",
-                "Coverage:",
-                "Omissions:",
-                "Tool-event fallback:",
-            )
-            for label in partial_labels:
-                if label not in details:
-                    errors.append(f"partial Forge details are missing {label}")
-            for value in (
-                extraction.get("discoveredSessionCount"),
-                extraction.get("completedSessionCount"),
-                extraction.get("omittedUnitCount"),
+            discovery_complete = extraction.get("discoveryComplete")
+            if not isinstance(discovery_complete, bool):
+                errors.append("selected proposal discoveryComplete is invalid")
+            else:
+                expect_detail(
+                    detail_values,
+                    "Discovery complete",
+                    "yes" if discovery_complete else "no",
+                    errors,
+                )
+            discovered = extraction.get("discoveredSessionCount")
+            completed = extraction.get("completedSessionCount")
+            if (
+                not isinstance(discovered, int)
+                or isinstance(discovered, bool)
+                or not isinstance(completed, int)
+                or isinstance(completed, bool)
             ):
-                if isinstance(value, int) and str(value) not in details:
-                    errors.append("partial Forge details omit a required numeric value")
-                    break
-            for kind in extraction.get("omittedUnitKinds") or []:
-                if isinstance(kind, str) and kind not in details:
-                    errors.append("partial Forge details omit an omission kind")
-                    break
+                errors.append("selected proposal partial session counts are invalid")
+            else:
+                expect_detail(
+                    detail_values,
+                    "Sessions",
+                    f"{completed} of {discovered} completed",
+                    errors,
+                )
+            formatted_coverage = coverage_text(extraction)
+            if formatted_coverage is None:
+                errors.append("selected proposal partial coverage is invalid")
+            else:
+                expect_detail(
+                    detail_values,
+                    "Coverage",
+                    formatted_coverage,
+                    errors,
+                )
+            omission_count = extraction.get("omittedUnitCount")
+            omission_kinds = extraction.get("omittedUnitKinds")
+            if (
+                not isinstance(omission_count, int)
+                or isinstance(omission_count, bool)
+                or not isinstance(omission_kinds, list)
+                or any(not isinstance(kind, str) or not kind for kind in omission_kinds)
+            ):
+                errors.append("selected proposal partial omissions are invalid")
+            else:
+                kinds = ", ".join(f"`{kind}`" for kind in sorted(omission_kinds))
+                expect_detail(
+                    detail_values,
+                    "Omissions",
+                    f"{omission_count} ({kinds})",
+                    errors,
+                )
+            fallback_enabled = extraction.get("toolEventFallbackEnabled")
+            if not isinstance(fallback_enabled, bool):
+                errors.append("selected proposal toolEventFallbackEnabled is invalid")
+            else:
+                expect_detail(
+                    detail_values,
+                    "Tool-event fallback",
+                    "enabled" if fallback_enabled else "disabled",
+                    errors,
+                )
+        elif status_value == "complete":
+            unexpected = sorted(set(PARTIAL_DETAIL_LABELS) & set(detail_values))
+            if unexpected:
+                errors.append(
+                    "complete Forge details contain partial-only fields: "
+                    + ", ".join(unexpected)
+                )
 
     marker_signature = "repository-skill-forge-proposal:v1"
     if body.count(marker) != 1 or body.count(marker_signature) != 1:
         errors.append("PR body must contain exactly the selected Forge marker")
-    if details_end >= 0 and body.find(marker) < details_end:
-        errors.append("selected Forge marker must follow the Forge details block")
-    if not body.rstrip().endswith(marker):
-        errors.append("selected Forge marker must be the final PR body content")
+    if details_end >= 0:
+        suffix = body[details_end + len("</details>") :].strip()
+        if suffix != marker:
+            errors.append(
+                "selected Forge marker must immediately follow the Forge details block"
+            )
     return errors
 
 
@@ -354,6 +505,8 @@ def validate_destination(value: str) -> PurePosixPath:
     destination = PurePosixPath(value)
     if destination.is_absolute() or any(part in {"", ".", ".."} for part in destination.parts):
         raise ValueError("destination must be a safe repository-relative path")
+    if len(destination.parts) < 2 or destination.parts[0] != "skills":
+        raise ValueError("destination must be a non-root path beneath skills/")
     if ".git" in destination.parts:
         raise ValueError("destination must not enter repository metadata")
     if any("$" in part for part in destination.parts):
@@ -367,7 +520,10 @@ def source_files(source: Path) -> tuple[list[Path], list[str]]:
     try:
         source_stat = source.lstat()
     except OSError as error:
-        return [], [str(error)]
+        return [], [
+            "failed to inspect selected proposal source: "
+            + (error.strerror or error.__class__.__name__)
+        ]
     if stat.S_ISLNK(source_stat.st_mode) or not stat.S_ISDIR(source_stat.st_mode):
         return [], ["selected proposal source must be a real directory"]
 
@@ -375,8 +531,17 @@ def source_files(source: Path) -> tuple[list[Path], list[str]]:
         root_path = Path(root)
         for directory in list(directories):
             path = root_path / directory
+            relative = path.relative_to(source)
+            if ".git" in relative.parts:
+                errors.append(
+                    f"selected proposal path enters repository metadata: {relative}"
+                )
+                directories.remove(directory)
+                continue
             if path.is_symlink():
-                errors.append(f"selected proposal contains symlink directory: {path}")
+                errors.append(
+                    f"selected proposal contains symlink directory: {relative}"
+                )
                 directories.remove(directory)
         for filename in filenames:
             path = root_path / filename
@@ -388,7 +553,10 @@ def source_files(source: Path) -> tuple[list[Path], list[str]]:
             try:
                 mode = path.lstat().st_mode
             except OSError as error:
-                errors.append(str(error))
+                errors.append(
+                    f"failed to inspect selected proposal entry {relative}: "
+                    + (error.strerror or error.__class__.__name__)
+                )
                 continue
             if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
                 errors.append(f"selected proposal entry is not a regular file: {relative}")
@@ -415,18 +583,16 @@ def file_leakage_errors(path: Path, label: str) -> list[str]:
     except UnicodeDecodeError:
         return [f"{label} is not UTF-8 text"]
     except OSError as error:
-        return [str(error)]
+        return [
+            f"failed to read {label}: "
+            + (error.strerror or error.__class__.__name__)
+        ]
     errors: list[str] = []
     findings = sensitive_findings(content)
     if findings:
         errors.append(f"{label} contains sensitive content: {', '.join(sorted(set(findings)))}")
-    if content.lstrip().startswith(("[", "{")):
-        try:
-            document = json.loads(content)
-        except json.JSONDecodeError:
-            document = None
-        if document is not None and contains_raw_session_rows(document):
-            errors.append(f"{label} contains raw session metadata")
+    if contains_raw_session_content(content):
+        errors.append(f"{label} contains raw session metadata")
     return errors
 
 
@@ -442,6 +608,10 @@ def validate_checkout(
         return [str(error)], set(), set()
     files, source_errors = source_files(source)
     errors.extend(source_errors)
+    if source.name != destination.name:
+        errors.append(
+            "selected proposal directory name must match the destination skill name"
+        )
     expected = {
         (destination / PurePosixPath(path.relative_to(source).as_posix())).as_posix()
         for path in files
@@ -476,7 +646,10 @@ def validate_checkout(
         try:
             mode = checkout_path.lstat().st_mode
         except OSError as error:
-            errors.append(str(error))
+            errors.append(
+                f"failed to inspect checkout destination {expected_path}: "
+                + (error.strerror or error.__class__.__name__)
+            )
             continue
         if not stat.S_ISREG(mode):
             errors.append(f"checkout destination is not a regular file: {expected_path}")

@@ -205,7 +205,7 @@ class PublicationBodyValidationTests(unittest.TestCase):
             target_sha="0123456789012345678901234567890123456789",
         )
 
-        self.assertIn("partial Forge details are missing Coverage:", errors)
+        self.assertIn("Forge details are missing Coverage:", errors)
 
     def test_requires_exact_marker_at_end(self) -> None:
         body = valid_body() + "\n\nExtra text"
@@ -216,7 +216,99 @@ class PublicationBodyValidationTests(unittest.TestCase):
             target_sha="0123456789012345678901234567890123456789",
         )
 
-        self.assertIn("selected Forge marker must be the final PR body content", errors)
+        self.assertIn(
+            "selected Forge marker must immediately follow the Forge details block",
+            errors,
+        )
+
+    def test_rejects_content_between_details_and_marker(self) -> None:
+        body = valid_body().replace(
+            "</details>\n\n<!-- repository",
+            "</details>\n\nUnreviewed text\n\n<!-- repository",
+        )
+
+        errors = validator.validate_body(
+            selection_document(),
+            body,
+            target_sha="0123456789012345678901234567890123456789",
+        )
+
+        self.assertIn(
+            "selected Forge marker must immediately follow the Forge details block",
+            errors,
+        )
+
+    def test_rejects_inexact_identity_bullets(self) -> None:
+        body = (
+            valid_body()
+            .replace(
+                "- Proposal key: `stacked-pr-workflow`",
+                "- Proposal key: `stacked-pr-workflow-v2`",
+            )
+            .replace(
+                "- Candidate IDs: `candidate-1`, `candidate-2`",
+                "- Candidate IDs: `candidate-10`, `candidate-2`",
+            )
+            .replace(
+                "- Target SHA: `0123456789012345678901234567890123456789`",
+                "- Target SHA: `ffffffffffffffffffffffffffffffffffffffff`\n"
+                "- Note: `0123456789012345678901234567890123456789`",
+            )
+        )
+
+        errors = validator.validate_body(
+            selection_document(),
+            body,
+            target_sha="0123456789012345678901234567890123456789",
+        )
+
+        self.assertTrue(any("Proposal key:" in error for error in errors))
+        self.assertTrue(any("Candidate IDs:" in error for error in errors))
+        self.assertTrue(any("Target SHA:" in error for error in errors))
+
+    def test_rejects_inexact_partial_coverage_values(self) -> None:
+        body = (
+            valid_body(partial=True)
+            .replace("- Discovery complete: no", "- Discovery complete: yes")
+            .replace("- Sessions: 10 of 12 completed", "- Sessions: 12 of 10 completed")
+            .replace("- Tool-event fallback: disabled", "- Tool-event fallback: enabled")
+        )
+
+        errors = validator.validate_body(
+            selection_document(partial=True),
+            body,
+            target_sha="0123456789012345678901234567890123456789",
+        )
+
+        self.assertTrue(any("Discovery complete:" in error for error in errors))
+        self.assertTrue(any("Sessions:" in error for error in errors))
+        self.assertTrue(any("Tool-event fallback:" in error for error in errors))
+
+    def test_accepts_exact_known_partial_coverage(self) -> None:
+        selection = selection_document(partial=True)
+        extraction = selection["selection"]["proposal"]["extraction"]
+        extraction.update(
+            {
+                "discoveryComplete": True,
+                "completedSessionCount": 9,
+                "sessionCoverage": 0.75,
+                "sessionCoverageStatus": "known",
+            }
+        )
+        body = (
+            valid_body(partial=True)
+            .replace("- Discovery complete: no", "- Discovery complete: yes")
+            .replace("- Sessions: 10 of 12 completed", "- Sessions: 9 of 12 completed")
+            .replace("- Coverage: unknown", "- Coverage: 75.0%")
+        )
+
+        errors = validator.validate_body(
+            selection,
+            body,
+            target_sha="0123456789012345678901234567890123456789",
+        )
+
+        self.assertEqual([], errors)
 
 
 class PublicationCheckoutValidationTests(unittest.TestCase):
@@ -224,7 +316,7 @@ class PublicationCheckoutValidationTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.repository = self.root / "repository"
-        self.source = self.root / "proposal"
+        self.source = self.root / "example"
         self.repository.mkdir()
         self.source.mkdir()
         subprocess.run(["git", "-C", str(self.repository), "init", "-q"], check=True)
@@ -322,6 +414,35 @@ class PublicationCheckoutValidationTests(unittest.TestCase):
 
         self.assertTrue(any("raw session metadata" in error for error in errors))
 
+    def test_rejects_jsonl_raw_session_metadata_with_preamble(self) -> None:
+        assets = self.source / "assets"
+        assets.mkdir()
+        row = {
+            "session_id": "session-1",
+            "agent_name": "Copilot CLI",
+            "repository": "owner/repository",
+            "branch": "main",
+            "created_at": "2026-08-19T00:00:00Z",
+            "updated_at": "2026-08-19T00:01:00Z",
+        }
+        (assets / "sessions.txt").write_text(
+            "Exported rows:\n```json\n"
+            + json.dumps(row)
+            + "\n"
+            + json.dumps({**row, "session_id": "session-2"})
+            + "\n```\n",
+            encoding="utf-8",
+        )
+        self.copy_source()
+
+        errors, _expected, _pending = validator.validate_checkout(
+            self.repository,
+            self.source,
+            "skills/example",
+        )
+
+        self.assertTrue(any("raw session metadata" in error for error in errors))
+
     def test_rejects_secret_shaped_selected_content(self) -> None:
         (self.source / "SKILL.md").write_text(
             "token=abcDEF1234567890\n",
@@ -373,7 +494,13 @@ class PublicationCheckoutValidationTests(unittest.TestCase):
         (outside / "example" / "SKILL.md").write_bytes(
             (self.source / "SKILL.md").read_bytes()
         )
-        (self.repository / "skills").symlink_to(outside, target_is_directory=True)
+        try:
+            (self.repository / "skills").symlink_to(
+                outside,
+                target_is_directory=True,
+            )
+        except (NotImplementedError, OSError) as error:
+            self.skipTest(f"symlinks are unavailable: {error}")
 
         errors, _expected, _pending = validator.validate_checkout(
             self.repository,
@@ -383,6 +510,39 @@ class PublicationCheckoutValidationTests(unittest.TestCase):
 
         self.assertTrue(any("contains a symlink" in error for error in errors))
 
+    def test_rejects_destination_outside_skills(self) -> None:
+        errors, _expected, _pending = validator.validate_checkout(
+            self.repository,
+            self.source,
+            "docs/example",
+        )
+
+        self.assertIn("destination must be a non-root path beneath skills/", errors)
+
+    def test_rejects_destination_name_mismatch(self) -> None:
+        errors, _expected, _pending = validator.validate_checkout(
+            self.repository,
+            self.source,
+            "skills/different-name",
+        )
+
+        self.assertIn(
+            "selected proposal directory name must match the destination skill name",
+            errors,
+        )
+
+    def test_source_symlink_error_uses_relative_path(self) -> None:
+        target = self.root / "outside"
+        target.mkdir()
+        try:
+            (self.source / "linked").symlink_to(target, target_is_directory=True)
+        except (NotImplementedError, OSError) as error:
+            self.skipTest(f"symlinks are unavailable: {error}")
+
+        _files, errors = validator.source_files(self.source)
+
+        self.assertIn("selected proposal contains symlink directory: linked", errors)
+        self.assertFalse(any(str(self.root) in error for error in errors))
 
 if __name__ == "__main__":
     unittest.main()

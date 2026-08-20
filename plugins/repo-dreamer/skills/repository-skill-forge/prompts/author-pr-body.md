@@ -91,12 +91,21 @@ After the four user-facing sections, add:
 </details>
 ```
 
-For partial extraction, also include the discovered and completed session
-counts, discovery completeness, known coverage or `unknown`, omission count and
-kinds, and tool-event fallback status.
+Sort candidate IDs lexically. For partial extraction, use these exact formats:
 
-Place the exact `selection.marker` after the closing `</details>` tag as the
-final non-whitespace content. Do not edit, reformat, or reconstruct it.
+```markdown
+- Discovery complete: yes|no
+- Sessions: <completed> of <discovered> completed
+- Coverage: unknown|<percentage with one decimal place>
+- Omissions: <count> (`<sorted-kind>`, ...)
+- Tool-event fallback: enabled|disabled
+```
+
+Do not add those five fields for complete extraction.
+
+Place the exact `selection.marker` immediately after the closing `</details>`
+tag as the only remaining non-whitespace content. Do not edit, reformat, or
+reconstruct it.
 
 ## Prohibited content
 
