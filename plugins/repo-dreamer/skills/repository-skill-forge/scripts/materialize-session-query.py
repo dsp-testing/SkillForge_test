@@ -98,11 +98,24 @@ def load_action(path: str, action_id: str) -> dict[str, Any]:
     return payload
 
 
-def result_content(
+def failure_message(result: dict[str, Any]) -> str:
+    for candidate in (result.get("content"), result.get("error")):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return "session_store_sql call was not explicitly successful"
+
+
+def probe_result(
     events_root: Path,
     sql: str,
     action_id: str | None = None,
-) -> str:
+) -> dict[str, Any]:
+    """Classify the current session's result for one action without raising.
+
+    States are ``ready`` with materializable ``content``, ``failed`` with the
+    tool's own error ``message``, ``handoff-mismatch``, ``error`` for a broken
+    but present result, and ``missing`` while the tool call has not completed.
+    """
     event_files = sorted(
         events_root.glob("*/events.jsonl"),
         key=lambda path: path.stat().st_mtime,
@@ -150,9 +163,12 @@ def result_content(
             key=lambda start: (-start[0], start[1]),
         )
         if normalize_sql(submitted_sql) != normalized_sql:
-            raise QueryHandoffMismatch(
-                f"session_store_sql query handoff mismatch for action {action_id}"
-            )
+            return {
+                "state": "handoff-mismatch",
+                "message": (
+                    f"session_store_sql query handoff mismatch for action {action_id}"
+                ),
+            }
         exact_call_ids.add(described_call_id)
 
     matching_call_ids = exact_call_ids or normalized_call_ids
@@ -208,23 +224,57 @@ def result_content(
             )
             selected = success, result
             break
-    if selected is not None:
-        success, result = selected
-        if success is not True:
-            raise ValueError(
-                "matching session_store_sql call was not explicitly successful"
-            )
-        content = result.get("content")
-        if not isinstance(content, str):
-            raise ValueError("matching session_store_sql result has no content")
-        spill_match = SPILL_PATH_RE.search(content)
-        if spill_match:
-            spill_path = Path(spill_match.group(1).strip())
-            if not spill_path.is_file():
-                raise ValueError(f"session_store_sql spill file not found: {spill_path}")
-            return spill_path.read_text(encoding="utf-8")
-        return content
-    raise ValueError("matching session_store_sql result not found in session event logs")
+    if selected is None:
+        return {
+            "state": "missing",
+            "message": (
+                "matching session_store_sql result not found in session event logs"
+            ),
+        }
+    success, result = selected
+    if success is not True:
+        return {"state": "failed", "message": failure_message(result)}
+    content = result.get("content")
+    if not isinstance(content, str):
+        return {
+            "state": "error",
+            "message": "matching session_store_sql result has no content",
+        }
+    spill_match = SPILL_PATH_RE.search(content)
+    if spill_match:
+        spill_path = Path(spill_match.group(1).strip())
+        if not spill_path.is_file():
+            return {
+                "state": "error",
+                "message": f"session_store_sql spill file not found: {spill_path}",
+            }
+        return {"state": "ready", "content": spill_path.read_text(encoding="utf-8")}
+    return {"state": "ready", "content": content}
+
+
+def result_content(
+    events_root: Path,
+    sql: str,
+    action_id: str | None = None,
+) -> str:
+    probe = probe_result(events_root, sql, action_id)
+    if probe["state"] == "ready":
+        return str(probe["content"])
+    if probe["state"] == "handoff-mismatch":
+        raise QueryHandoffMismatch(probe["message"])
+    if probe["state"] == "failed":
+        raise ValueError(
+            "matching session_store_sql call was not explicitly successful"
+        )
+    raise ValueError(probe["message"])
+
+
+def materialize_content(kind: str, content: str, output_path: str) -> int:
+    """Parse one bounded result into the controller's JSON artifact."""
+    header, raw_rows = table_rows(content)
+    rows = parse_rows(kind, header, raw_rows)
+    write_json(output_path, rows)
+    return len(rows)
 
 
 def table_rows(content: str) -> tuple[list[str] | None, list[str]]:
@@ -375,9 +425,7 @@ def main() -> None:
         raise SystemExit("action is missing kind")
     try:
         content = result_content(Path(args.events_root), sql, args.action)
-        header, raw_rows = table_rows(content)
-        rows = parse_rows(kind, header, raw_rows)
-        write_json(output_path, rows)
+        materialize_content(kind, content, output_path)
         print(output_path)
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise SystemExit(str(error)) from error
