@@ -278,5 +278,13 @@ class ProposalMarkerTests(unittest.TestCase):
             ledger.select([invalid], [])
 
 
+class PublicationContractTests(unittest.TestCase):
+    def test_forge_opens_new_pull_requests_ready_for_review(self) -> None:
+        contract = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("pass `draft: false` explicitly", contract)
+        self.assertIn("open ready for review", contract)
+
+
 if __name__ == "__main__":
     unittest.main()

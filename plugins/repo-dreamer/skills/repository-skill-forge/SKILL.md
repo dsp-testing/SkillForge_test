@@ -375,6 +375,9 @@ Set `$SELECTED_PROPOSAL_DIR` to the selected run-local skill directory and
 `$SKILL_PATH` to its repository-relative destination before the checkout
 validation steps.
 
+For every `create` action, pass `draft: false` explicitly so newly created
+Forge PRs open ready for review. Never omit the field or rely on the platform
+default.
 For a create action, stage only the selected proposal. Before copying, reject
 symlinks in its source tree, every existing destination path component, and
 every existing destination entry mapped from a selected source entry. Compare
