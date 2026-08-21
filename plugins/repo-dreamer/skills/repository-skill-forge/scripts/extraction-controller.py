@@ -213,7 +213,8 @@ def terminal_summary(state: dict[str, Any]) -> dict[str, Any]:
         detail = f"; pending actions: {', '.join(pending)}" if pending else ""
         raise ValueError(
             "extraction is not terminal: status is running"
-            f"{detail}; continue invoking next and recording every outcome"
+            f"{detail}; every outstanding action must be recorded before extraction "
+            "can be asserted terminal"
         )
     if status not in {"complete", "partial", "blocked"}:
         raise ValueError(f"extraction has unsupported terminal status: {status}")

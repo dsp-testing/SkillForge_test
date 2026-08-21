@@ -97,6 +97,192 @@
       },
       "additionalProperties": false
     },
+    "workerWaveAction": {
+      "type": "object",
+      "description": "Exactly the arguments for one bounded session_store_sql call.",
+      "required": ["actionId", "description", "kind", "query"],
+      "properties": {
+        "actionId": { "type": "string" },
+        "description": {
+          "type": "string",
+          "description": "Equals actionId and must be passed to session_store_sql unchanged."
+        },
+        "kind": {
+          "enum": ["discovery", "metadata", "refs", "files", "tool-calls"]
+        },
+        "rowLimit": { "type": ["integer", "null"], "minimum": 1 },
+        "query": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "workerProgress": {
+      "type": "object",
+      "description": "Bounded counters only: never session IDs, SQL, or result rows.",
+      "required": [
+        "status",
+        "discoveryComplete",
+        "discoveredSessionCount",
+        "completedSessionCount",
+        "batchCount",
+        "batchesComplete",
+        "omittedUnitCount",
+        "blockerCount"
+      ],
+      "properties": {
+        "status": { "enum": ["running", "complete", "partial", "blocked"] },
+        "discoveryComplete": { "type": "boolean" },
+        "partitionCount": { "type": "integer", "minimum": 0 },
+        "discoveredSessionCount": { "type": "integer", "minimum": 0 },
+        "completedSessionCount": { "type": "integer", "minimum": 0 },
+        "omittedSessionCount": { "type": "integer", "minimum": 0 },
+        "batchCount": { "type": "integer", "minimum": 0 },
+        "batchesComplete": { "type": "integer", "minimum": 0 },
+        "batchesOmitted": { "type": "integer", "minimum": 0 },
+        "batchesPending": { "type": "integer", "minimum": 0 },
+        "queryAttempts": { "type": "integer", "minimum": 0 },
+        "successfulQueries": { "type": "integer", "minimum": 0 },
+        "failedQueries": { "type": "integer", "minimum": 0 },
+        "rows": { "type": "integer", "minimum": 0 },
+        "toolCalls": { "type": "integer", "minimum": 0 },
+        "omittedUnitCount": { "type": "integer", "minimum": 0 },
+        "omittedUnitKinds": { "type": "array", "items": { "type": "string" } },
+        "blockerCount": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "workerRecordedOutcome": {
+      "type": "object",
+      "required": ["actionId", "outcome"],
+      "properties": {
+        "actionId": { "type": "string" },
+        "outcome": {
+          "enum": ["success", "query-failure", "handoff", "artifact", "pending"]
+        },
+        "rowCount": { "type": "integer", "minimum": 0 },
+        "message": { "type": "string", "maxLength": 200 }
+      },
+      "additionalProperties": false
+    },
+    "workerEnvelope": {
+      "type": "object",
+      "description": "The complete model-facing contract of extraction-worker.py.",
+      "required": ["protocolVersion", "kind", "runId", "status", "progress"],
+      "properties": {
+        "protocolVersion": { "const": 1 },
+        "kind": { "enum": ["wave", "terminal", "status"] },
+        "runId": { "type": "string" },
+        "cycle": { "type": "integer", "minimum": 0 },
+        "status": { "enum": ["running", "complete", "partial", "blocked"] },
+        "terminal": { "type": "boolean" },
+        "recorded": {
+          "type": "object",
+          "required": ["counts", "actions"],
+          "properties": {
+            "counts": {
+              "type": "object",
+              "additionalProperties": { "type": "integer", "minimum": 0 }
+            },
+            "actions": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/workerRecordedOutcome" }
+            }
+          },
+          "additionalProperties": false
+        },
+        "checkpoint": {
+          "type": "object",
+          "required": [
+            "checkpointedBatchCount",
+            "processedBatchCount",
+            "terminalCoverageAttached",
+            "failed"
+          ],
+          "properties": {
+            "checkpointedBatchCount": { "type": "integer", "minimum": 0 },
+            "processedBatchCount": { "type": "integer", "minimum": 0 },
+            "terminalCoverageAttached": { "type": "boolean" },
+            "failed": { "type": "boolean" },
+            "reason": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "progress": { "$ref": "#/$defs/workerProgress" },
+        "wave": {
+          "type": "object",
+          "required": ["manifestPath", "actionCount", "actions"],
+          "properties": {
+            "manifestPath": { "type": "string" },
+            "actionCount": { "type": "integer", "minimum": 1 },
+            "actions": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/workerWaveAction" }
+            }
+          },
+          "additionalProperties": false
+        },
+        "next": {
+          "type": "object",
+          "required": ["tool", "callCount", "thenCommand"],
+          "properties": {
+            "tool": { "const": "session_store_sql" },
+            "callCount": { "type": "integer", "minimum": 1 },
+            "arguments": { "type": "string" },
+            "thenCommand": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "coverage": { "type": "object" },
+        "coveragePath": { "type": "string" },
+        "omissionSummary": {
+          "type": "object",
+          "required": ["count", "kinds"],
+          "properties": {
+            "count": { "type": "integer", "minimum": 1 },
+            "kinds": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        },
+        "blocker": {
+          "type": "object",
+          "required": ["reason"],
+          "properties": {
+            "kind": { "type": ["string", "null"] },
+            "errorKind": { "type": ["string", "null"] },
+            "actionId": { "type": ["string", "null"] },
+            "reason": { "type": "string", "maxLength": 400 }
+          },
+          "additionalProperties": false
+        },
+        "assertion": {
+          "type": "object",
+          "required": ["ok"],
+          "properties": {
+            "ok": { "type": "boolean" },
+            "status": { "type": "string" },
+            "reason": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "pendingActionIds": { "type": "array", "items": { "type": "string" } },
+        "ledgerPath": { "type": "string" },
+        "statePath": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "wave" } } },
+          "then": { "required": ["wave", "next", "cycle", "terminal"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "terminal" } } },
+          "then": {
+            "required": ["terminal", "ledgerPath"],
+            "not": { "required": ["wave"] }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
     "normalizedSessionDocument": {
       "type": "object",
       "required": ["schemaVersion", "scope", "coverage", "userDiversity", "sessions"],

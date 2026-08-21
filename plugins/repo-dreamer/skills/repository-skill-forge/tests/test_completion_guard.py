@@ -1279,9 +1279,9 @@ class GuardContractDocumentationTests(unittest.TestCase):
     def test_skill_still_requires_terminal_assertion_before_finishing(self) -> None:
         contract = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
 
-        self.assertIn("assert-terminal", contract)
+        self.assertIn("--assert-terminal", contract)
         self.assertIn(
-            "If this command fails because status is `running`, a final response and cleanup\nare forbidden.",
+            "If this fails because status is `running`, a final response and cleanup are\nforbidden.",
             contract,
         )
         self.assertIn("Only once that command succeeds", contract)
