@@ -293,17 +293,17 @@ def wave_boundary(
     """Tool calls already completed per action when this wave is emitted.
 
     Recording this boundary is what stops a re-issued action, which keeps its
-    exact action ID and SQL, from harvesting its own previous attempt.
+    exact action ID and SQL, from harvesting its own previous attempt. The
+    whole wave is resolved in one scan of the session logs.
     """
-    return {
-        str(action["actionId"]): materializer.observed_call_ids(
-            events_root,
-            str(action["sql"]),
-            str(action["actionId"]),
-        )
-        for action in actions
-        if action.get("actionId") and action.get("sql")
-    }
+    return materializer.observed_call_ids_batch(
+        events_root,
+        [
+            (str(action["actionId"]), str(action["sql"]))
+            for action in actions
+            if action.get("actionId") and action.get("sql")
+        ],
+    )
 
 
 def issued_boundary(worker: dict[str, Any]) -> dict[str, frozenset[str]]:
@@ -579,6 +579,7 @@ def advance(
         state,
         int(state["limits"]["maxConcurrentBatches"]),
     )
+    boundary = wave_boundary(actions, events_root) if actions else {}
     save_state(layout, state)
 
     worker["cycle"] = int(worker.get("cycle", 0)) + 1
@@ -590,7 +591,7 @@ def advance(
     recorded = recorded_summary(outcomes)
 
     if actions:
-        worker["waveBoundary"] = wave_boundary(actions, events_root)
+        worker["waveBoundary"] = boundary
         write_json(layout.worker_state, worker)
         return wave_envelope(
             layout,

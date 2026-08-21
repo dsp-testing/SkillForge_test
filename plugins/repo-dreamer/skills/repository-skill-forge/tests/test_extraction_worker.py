@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = SKILL_DIR / "scripts"
@@ -1024,6 +1025,107 @@ class ReviewRegressionTests(unittest.TestCase):
                 "SELECT 1",
                 "action-1",
             )
+
+    def test_boundary_scan_failure_leaves_no_committed_wave_without_a_boundary(
+        self,
+    ) -> None:
+        harness = Harness(self.root, ["session-1"])
+        envelope = self.metadata_wave(harness, session_batch_size="1")
+        metadata = envelope["wave"]["actions"][0]
+        harness.respond(metadata, success=False, error="connection reset by peer")
+        worker_before = (harness.run_dir / "worker" / "worker-state.json").read_bytes()
+
+        with mock.patch.object(
+            worker.materializer,
+            "observed_call_ids_batch",
+            side_effect=FileNotFoundError("session log vanished mid-scan"),
+        ):
+            with self.assertRaises(FileNotFoundError):
+                worker.advance(
+                    worker.WorkerLayout(harness.run_dir),
+                    events_root=harness.events_root,
+                    wait_seconds=0.0,
+                    poll_interval=0.0,
+                )
+
+        crashed = json.loads(
+            (harness.run_dir / "extraction-state.json").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual([], crashed["issuedActions"])
+        self.assertEqual(
+            ["retry_same_unit"],
+            [entry["kind"] for entry in crashed["retryHistory"]],
+        )
+        self.assertEqual(
+            worker_before,
+            (harness.run_dir / "worker" / "worker-state.json").read_bytes(),
+        )
+
+        envelope = harness.advance()
+
+        self.assertEqual("wave", envelope["kind"])
+        self.assertEqual(metadata["actionId"], envelope["wave"]["actions"][0]["actionId"])
+        self.assertEqual(1, envelope["progress"]["failedQueries"])
+        harness.respond(envelope["wave"]["actions"][0])
+        self.assertEqual("complete", harness.drive(harness.advance())["status"])
+
+    def test_wave_boundary_scans_the_session_logs_once_per_wave(self) -> None:
+        harness = Harness(self.root, [f"session-{index}" for index in range(3)])
+        envelope = harness.start(session_batch_size="1", max_concurrent_batches="3")
+        harness.respond(envelope["wave"]["actions"][0])
+        layout = worker.WorkerLayout(harness.run_dir)
+        calls: list[int] = []
+        original = worker.materializer.observed_call_ids_batch
+
+        def counted(events_root: Path, targets: list[tuple[str, str]]):
+            calls.append(len(targets))
+            return original(events_root, targets)
+
+        with mock.patch.object(
+            worker.materializer,
+            "observed_call_ids_batch",
+            side_effect=counted,
+        ):
+            envelope = worker.advance(
+                layout,
+                events_root=harness.events_root,
+                wait_seconds=0.0,
+                poll_interval=0.0,
+            )
+
+        self.assertEqual(3, envelope["wave"]["actionCount"])
+        self.assertEqual([3], calls)
+
+    def test_batched_boundary_matches_per_action_resolution(self) -> None:
+        harness = Harness(self.root, ["session-1", "session-2"])
+        envelope = harness.start(session_batch_size="1", max_concurrent_batches="2")
+        harness.respond(envelope["wave"]["actions"][0])
+        envelope = harness.advance()
+        for action in envelope["wave"]["actions"]:
+            harness.respond(action, success=False, error="connection reset by peer")
+        envelope = harness.advance()
+        manifest = json.loads(
+            Path(envelope["wave"]["manifestPath"]).read_text(encoding="utf-8")
+        )
+
+        targets = [
+            (str(action["actionId"]), str(action["sql"]))
+            for action in manifest["actions"]
+        ]
+        batched = materializer.observed_call_ids_batch(harness.events_root, targets)
+        individual = {
+            action_id: materializer.observed_call_ids(
+                harness.events_root,
+                sql,
+                action_id,
+            )
+            for action_id, sql in targets
+        }
+
+        self.assertEqual(2, len(targets))
+        self.assertEqual(individual, batched)
+        self.assertTrue(all(batched[action_id] for action_id, _ in targets))
 
     def test_then_command_is_shell_safe_for_paths_containing_spaces(self) -> None:
         harness = Harness(self.root, ["session-1"], run_name="forge run dir")

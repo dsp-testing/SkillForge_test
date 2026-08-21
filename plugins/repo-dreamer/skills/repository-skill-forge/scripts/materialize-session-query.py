@@ -218,21 +218,109 @@ def matching_completions(
     return False, match_groups
 
 
+def observed_call_ids_batch(
+    events_root: Path,
+    targets: list[tuple[str, str]],
+) -> dict[str, list[str]]:
+    """Completed tool-call IDs per action, resolved in one scan of the logs.
+
+    ``targets`` pairs an action ID with its SQL. Resolving a whole wave in a
+    single scan keeps the wave boundary from multiplying the worker's dominant
+    I/O cost by the wave width.
+    """
+    if not targets:
+        return {}
+    event_files = sorted(
+        events_root.glob("*/events.jsonl"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    wanted = {action_id: normalize_sql(sql) for action_id, sql in targets}
+    exact: dict[str, set[str]] = {action_id: set() for action_id, _ in targets}
+    loose: dict[str, set[str]] = {action_id: set() for action_id, _ in targets}
+    described: dict[str, tuple[int, int, str]] = {}
+    for file_index, event_file in enumerate(event_files):
+        for event_index, event in enumerate(read_events(event_file)):
+            if event.get("type") != "tool.execution_start":
+                continue
+            data = event.get("data")
+            if not isinstance(data, dict) or data.get("toolName") != "session_store_sql":
+                continue
+            arguments = data.get("arguments")
+            call_id = data.get("toolCallId")
+            if not isinstance(arguments, dict) or not isinstance(call_id, str):
+                continue
+            query = arguments.get("query")
+            if not isinstance(query, str):
+                continue
+            query_tokens = normalize_sql(query)
+            for action_id, sql in targets:
+                if query == sql:
+                    exact[action_id].add(call_id)
+                elif query_tokens == wanted[action_id]:
+                    loose[action_id].add(call_id)
+            description = arguments.get("description")
+            if isinstance(description, str) and description in wanted:
+                previous = described.get(description)
+                position = (-file_index, event_index)
+                if previous is None or (-previous[0], previous[1]) < position:
+                    described[description] = (file_index, event_index, call_id)
+    for action_id, call in described.items():
+        exact[action_id].add(call[2])
+    matching = {
+        action_id: (exact[action_id] or loose[action_id]) for action_id, _ in targets
+    }
+
+    observed: dict[str, set[str]] = {action_id: set() for action_id, _ in targets}
+    for event_file in event_files:
+        for event in read_events(event_file):
+            if event.get("type") != "tool.execution_complete":
+                continue
+            data = event.get("data")
+            if not isinstance(data, dict):
+                continue
+            result = data.get("result")
+            call_id = data.get("toolCallId")
+            if not isinstance(result, dict) or not isinstance(call_id, str):
+                continue
+            detailed = result.get("detailedContent")
+            sql_match = (
+                DETAILED_SQL_RE.fullmatch(detailed)
+                if isinstance(detailed, str)
+                else None
+            )
+            rendered_sql = (
+                sql_match.group(1).split("\n\n", 1)[0] if sql_match else None
+            )
+            rendered_tokens = (
+                normalize_sql(rendered_sql) if isinstance(rendered_sql, str) else None
+            )
+            for action_id, sql in targets:
+                if call_id in matching[action_id] or rendered_sql == sql or (
+                    rendered_tokens is not None
+                    and rendered_tokens == wanted[action_id]
+                ):
+                    observed[action_id].add(call_id)
+    return {action_id: sorted(observed[action_id]) for action_id, _ in targets}
+
+
 def observed_call_ids(
     events_root: Path,
     sql: str,
     action_id: str | None = None,
 ) -> list[str]:
     """Tool-call IDs already completed for this action, for wave boundaries."""
-    _, match_groups = matching_completions(events_root, sql, action_id, frozenset())
-    return sorted(
-        {
-            call_id
-            for matches in match_groups
-            for _, _, call_id, _, _ in matches
-            if call_id
-        }
-    )
+    if action_id is None:
+        _, match_groups = matching_completions(events_root, sql, None, frozenset())
+        return sorted(
+            {
+                call_id
+                for matches in match_groups
+                for _, _, call_id, _, _ in matches
+                if call_id
+            }
+        )
+    return observed_call_ids_batch(events_root, [(action_id, sql)])[action_id]
 
 
 def probe_result(
