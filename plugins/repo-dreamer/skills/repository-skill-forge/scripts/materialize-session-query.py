@@ -256,6 +256,15 @@ def table_rows(content: str) -> tuple[list[str] | None, list[str]]:
         raise ValueError(
             f"session_store_sql row count mismatch: expected {expected}, found {len(rows)}"
         )
+    if header and header[-1] == "_query_source":
+        # session_store_sql supplements local-store results with a trailing
+        # _query_source column. It is not part of any expected schema, so drop
+        # it here (only when it is genuinely the last column) before header
+        # validation runs. A single right-hand split removes only that final
+        # Markdown cell, leaving embedded " | " sequences in earlier values
+        # (e.g. arguments_json) untouched.
+        header = header[:-1]
+        rows = [row.rsplit(" | ", 1)[0] for row in rows]
     return header, rows
 
 
