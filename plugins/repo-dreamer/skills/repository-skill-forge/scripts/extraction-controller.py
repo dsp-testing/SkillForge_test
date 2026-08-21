@@ -22,6 +22,22 @@ from session_queries import (
 )
 
 
+DIAGNOSTICS_SCHEMA_VERSION = 1
+TERMINAL_STATUSES = ("complete", "partial", "blocked")
+BATCH_STATUSES = ("metadata", "refs", "files", "tools", "complete", "omitted")
+
+
+def default_work_counters() -> dict[str, int]:
+    return {
+        "queryAttempts": 0,
+        "successfulQueries": 0,
+        "failedQueries": 0,
+        "rows": 0,
+        "toolCalls": 0,
+        "artifactBytes": 0,
+    }
+
+
 def partition_id(start: str, end: str) -> str:
     return stable_hash({"start": start, "end": end}, 12)
 
@@ -102,14 +118,7 @@ def initialize(args: argparse.Namespace) -> dict[str, Any]:
         "omittedUnits": [],
         "issuedActions": [],
         "handledActionIds": [],
-        "workCounters": {
-            "queryAttempts": 0,
-            "successfulQueries": 0,
-            "failedQueries": 0,
-            "rows": 0,
-            "toolCalls": 0,
-            "artifactBytes": 0,
-        },
+        "workCounters": default_work_counters(),
         "coverage": None,
         "status": "running",
     }
@@ -142,17 +151,7 @@ def validate_state_invariants(state: dict[str, Any]) -> None:
 
 
 def work_counters(state: dict[str, Any]) -> dict[str, int]:
-    return state.setdefault(
-        "workCounters",
-        {
-            "queryAttempts": 0,
-            "successfulQueries": 0,
-            "failedQueries": 0,
-            "rows": 0,
-            "toolCalls": 0,
-            "artifactBytes": 0,
-        },
-    )
+    return state.setdefault("workCounters", default_work_counters())
 
 
 def extraction_coverage(state: dict[str, Any]) -> dict[str, Any]:
@@ -230,6 +229,124 @@ def terminal_summary(state: dict[str, Any]) -> dict[str, Any]:
     if status == "blocked":
         summary["blocker"] = state["blockers"][-1]
     return summary
+
+
+def counter_snapshot(state: dict[str, Any]) -> dict[str, int]:
+    counters = default_work_counters()
+    recorded = state.get("workCounters")
+    if isinstance(recorded, dict):
+        for key, value in recorded.items():
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                counters[str(key)] = value
+    return counters
+
+
+def action_diagnostics(state: dict[str, Any]) -> dict[str, Any]:
+    issued = [
+        str(action["actionId"])
+        for action in state.get("issuedActions", [])
+        if isinstance(action, dict) and action.get("actionId")
+    ]
+    handled = {
+        str(value) for value in state.get("handledActionIds", []) if value
+    }
+    pending = [action_id for action_id in issued if action_id not in handled]
+    return {
+        "issuedActionIds": issued,
+        "issuedActionCount": len(issued),
+        "pendingActionIds": pending,
+        "pendingActionCount": len(pending),
+        "handledActionCount": len(handled),
+        "retryCount": len(state.get("retryHistory", [])),
+    }
+
+
+def batch_diagnostics(state: dict[str, Any]) -> dict[str, Any]:
+    counts = dict.fromkeys(BATCH_STATUSES, 0)
+    total = 0
+    for partition in state.get("partitions", []):
+        if not isinstance(partition, dict):
+            continue
+        for batch in partition.get("batches", []):
+            if not isinstance(batch, dict):
+                continue
+            total += 1
+            status = str(batch.get("status"))
+            counts[status] = counts.get(status, 0) + 1
+    complete = counts.get("complete", 0)
+    omitted = counts.get("omitted", 0)
+    return {
+        "total": total,
+        "complete": complete,
+        "omitted": omitted,
+        "pending": total - complete - omitted,
+        "byStatus": counts,
+    }
+
+
+def partition_diagnostics(state: dict[str, Any]) -> dict[str, Any]:
+    partitions = [
+        partition
+        for partition in state.get("partitions", [])
+        if isinstance(partition, dict)
+    ]
+    discovered = sum(1 for item in partitions if item.get("discoveryComplete"))
+    return {
+        "total": len(partitions),
+        "discoveryComplete": discovered,
+        "pendingDiscovery": len(partitions) - discovered,
+        "omitted": sum(1 for item in partitions if item.get("status") == "omitted"),
+    }
+
+
+def diagnostics(
+    state: dict[str, Any],
+    *,
+    checkpoint: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Compact machine-readable snapshot derived from existing controller state."""
+    status = str(state.get("status"))
+    invariant_error: str | None = None
+    try:
+        validate_state_invariants(state)
+    except ValueError as error:
+        invariant_error = str(error)
+    coverage = extraction_coverage(state)
+    scope = state.get("scope") if isinstance(state.get("scope"), dict) else {}
+    blockers = state.get("blockers", [])
+    return {
+        "kind": "extraction-diagnostics",
+        "schemaVersion": DIAGNOSTICS_SCHEMA_VERSION,
+        "status": status,
+        "terminal": status in TERMINAL_STATUSES,
+        "consistent": invariant_error is None,
+        "invariantError": invariant_error,
+        "repository": scope.get("repository"),
+        "windowStart": scope.get("windowStart"),
+        "windowEnd": scope.get("windowEnd"),
+        "runDir": state.get("runDir"),
+        "counters": counter_snapshot(state),
+        "actions": action_diagnostics(state),
+        "sessions": {
+            "discovered": coverage["discoveredSessionCount"],
+            "completed": coverage["completedSessionCount"],
+            "omittedUnits": coverage["omittedUnitCount"],
+            "omittedUnitKinds": coverage["omittedUnitKinds"],
+        },
+        "batches": batch_diagnostics(state),
+        "partitions": partition_diagnostics(state),
+        "discoveryComplete": coverage["discoveryComplete"],
+        "coverage": {
+            "sessionCoverage": coverage["sessionCoverage"],
+            "sessionCoverageStatus": coverage["sessionCoverageStatus"],
+            "toolEventFallbackEnabled": coverage["toolEventFallbackEnabled"],
+            "fallbackCount": coverage["fallbackCount"],
+            "finalized": state.get("coverage") is not None,
+        },
+        "checkpoint": checkpoint,
+        "blocker": blockers[-1] if blockers else None,
+        "blockerCount": len(blockers),
+    }
 
 
 def next_actions(
@@ -1197,6 +1314,11 @@ def main() -> None:
     terminal.add_argument("--state", required=True)
     terminal.add_argument("--out")
 
+    snapshot = subparsers.add_parser("diagnostics")
+    snapshot.add_argument("--state", required=True)
+    snapshot.add_argument("--checkpoint")
+    snapshot.add_argument("--out")
+
     success = subparsers.add_parser("record-success")
     success.add_argument("--state", required=True)
     success.add_argument("--action", required=True)
@@ -1284,6 +1406,18 @@ def main() -> None:
                 write_json(args.out, summary)
             else:
                 print(json.dumps(summary, indent=2))
+            return
+        if args.command == "diagnostics":
+            checkpoint = None
+            if args.checkpoint and Path(args.checkpoint).is_file():
+                checkpoint = read_json(args.checkpoint)
+                if not isinstance(checkpoint, dict):
+                    raise ValueError("checkpoint summary must be a JSON object")
+            snapshot = diagnostics(state, checkpoint=checkpoint)
+            if args.out:
+                write_json(args.out, snapshot)
+            else:
+                print(json.dumps(snapshot, indent=2))
             return
         if args.command == "record-checkpoint-failure":
             record_checkpoint_failure(state, args.reason)
