@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import shlex
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -198,6 +199,7 @@ def wave_action(action: dict[str, Any]) -> dict[str, Any]:
 def probe_action(
     action: dict[str, Any],
     events_root: Path,
+    exclude_call_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Resolve one issued action into a deterministic recording outcome."""
     action_id = str(action.get("actionId"))
@@ -212,7 +214,7 @@ def probe_action(
             "outcome": "artifact",
             "message": "issued action is missing sql, kind, or outputPath",
         }
-    probe = materializer.probe_result(events_root, sql, action_id)
+    probe = materializer.probe_result(events_root, sql, action_id, exclude_call_ids)
     state = probe["state"]
     if state == "missing":
         return {"actionId": action_id, "outcome": "pending"}
@@ -252,10 +254,12 @@ def harvest(
     *,
     wait_seconds: float,
     poll_interval: float,
+    excluded: dict[str, frozenset[str]] | None = None,
     sleep: Any = time.sleep,
     monotonic: Any = time.monotonic,
 ) -> list[dict[str, Any]]:
     """Probe every issued action, optionally waiting for in-flight tool calls."""
+    boundary = excluded or {}
     resolved: dict[str, dict[str, Any]] = {}
     deadline = monotonic() + max(wait_seconds, 0.0)
     while True:
@@ -263,7 +267,11 @@ def harvest(
             action_id = str(action.get("actionId"))
             if action_id in resolved:
                 continue
-            outcome = probe_action(action, events_root)
+            outcome = probe_action(
+                action,
+                events_root,
+                boundary.get(action_id, frozenset()),
+            )
             if outcome["outcome"] != "pending":
                 resolved[action_id] = outcome
         if len(resolved) == len(actions) or monotonic() >= deadline:
@@ -276,6 +284,37 @@ def harvest(
         )
         for action in actions
     ]
+
+
+def wave_boundary(
+    actions: list[dict[str, Any]],
+    events_root: Path,
+) -> dict[str, list[str]]:
+    """Tool calls already completed per action when this wave is emitted.
+
+    Recording this boundary is what stops a re-issued action, which keeps its
+    exact action ID and SQL, from harvesting its own previous attempt.
+    """
+    return {
+        str(action["actionId"]): materializer.observed_call_ids(
+            events_root,
+            str(action["sql"]),
+            str(action["actionId"]),
+        )
+        for action in actions
+        if action.get("actionId") and action.get("sql")
+    }
+
+
+def issued_boundary(worker: dict[str, Any]) -> dict[str, frozenset[str]]:
+    recorded = worker.get("waveBoundary")
+    if not isinstance(recorded, dict):
+        return {}
+    return {
+        str(action_id): frozenset(str(value) for value in call_ids)
+        for action_id, call_ids in recorded.items()
+        if isinstance(call_ids, list)
+    }
 
 
 def record_outcome(
@@ -483,9 +522,14 @@ def wave_envelope(
             "tool": "session_store_sql",
             "callCount": len(actions),
             "arguments": "wave.actions[].description and wave.actions[].query",
-            "thenCommand": (
-                f"python3 {SCRIPT_DIR / 'extraction-worker.py'}"
-                f" advance --run-dir {layout.run_dir}"
+            "thenCommand": shlex.join(
+                [
+                    "python3",
+                    str(SCRIPT_DIR / "extraction-worker.py"),
+                    "advance",
+                    "--run-dir",
+                    str(layout.run_dir),
+                ]
             ),
         },
     }
@@ -519,6 +563,7 @@ def advance(
             events_root,
             wait_seconds=wait_seconds,
             poll_interval=poll_interval,
+            excluded=issued_boundary(worker),
         )
         if issued
         else []
@@ -545,6 +590,7 @@ def advance(
     recorded = recorded_summary(outcomes)
 
     if actions:
+        worker["waveBoundary"] = wave_boundary(actions, events_root)
         write_json(layout.worker_state, worker)
         return wave_envelope(
             layout,
@@ -557,6 +603,7 @@ def advance(
     if not checkpoint_summary["failed"] and state["status"] in {"complete", "partial"}:
         checkpoint_summary = run_checkpoint(layout, state, branches)
         save_state(layout, state)
+    worker["waveBoundary"] = {}
     write_json(layout.worker_state, worker)
     return terminal_envelope(layout, worker, state, recorded, checkpoint_summary)
 
@@ -611,6 +658,7 @@ def start(layout: WorkerLayout, args: argparse.Namespace) -> dict[str, Any]:
             "windowEnd": window_end,
             "mainBranches": sorted(set(args.main_branch)),
             "cycle": 0,
+            "waveBoundary": {},
             "toolCallsIssued": 0,
             "waveHistory": [],
         },

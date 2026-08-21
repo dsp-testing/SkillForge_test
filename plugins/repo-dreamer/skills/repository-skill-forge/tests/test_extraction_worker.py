@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,14 @@ WORKER_SPEC = importlib.util.spec_from_file_location(
 assert WORKER_SPEC is not None and WORKER_SPEC.loader is not None
 worker = importlib.util.module_from_spec(WORKER_SPEC)
 WORKER_SPEC.loader.exec_module(worker)
+
+MATERIALIZER_SPEC = importlib.util.spec_from_file_location(
+    "worker_materialize_session_query",
+    SCRIPTS_DIR / "materialize-session-query.py",
+)
+assert MATERIALIZER_SPEC is not None and MATERIALIZER_SPEC.loader is not None
+materializer = importlib.util.module_from_spec(MATERIALIZER_SPEC)
+MATERIALIZER_SPEC.loader.exec_module(materializer)
 
 RESULT_COLUMNS = {
     "discovery": ["session_id", "updated_at"],
@@ -73,17 +82,68 @@ def metadata_row(session: str) -> dict[str, object]:
     }
 
 
+def matches_type(value: object, name: str) -> bool:
+    if name == "object":
+        return isinstance(value, dict)
+    if name == "array":
+        return isinstance(value, list)
+    if name == "string":
+        return isinstance(value, str)
+    if name == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if name == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if name == "boolean":
+        return isinstance(value, bool)
+    if name == "null":
+        return value is None
+    raise AssertionError(f"unsupported schema type: {name}")
+
+
 def conformance_errors(
     value: object,
     schema: dict[str, object],
     definitions: dict[str, object],
     path: str = "$",
 ) -> list[str]:
-    """Check the subset of JSON Schema the worker protocol contract uses."""
+    """Validate the JSON Schema keywords the worker protocol contract uses.
+
+    Supports $ref, type, const, enum, required, properties, items, minItems,
+    minimum, maxLength, boolean and schema-valued additionalProperties, allOf,
+    if/then/else, and not. Any other keyword fails loudly rather than silently
+    passing, so the contract cannot outgrow this checker unnoticed.
+    """
+    supported = {
+        "$ref",
+        "description",
+        "type",
+        "const",
+        "enum",
+        "required",
+        "properties",
+        "additionalProperties",
+        "items",
+        "minItems",
+        "minimum",
+        "maxLength",
+        "allOf",
+        "if",
+        "then",
+        "else",
+        "not",
+    }
+    unsupported = set(schema) - supported
+    assert not unsupported, f"{path}: unsupported schema keywords {sorted(unsupported)}"
+
     if "$ref" in schema:
         reference = str(schema["$ref"]).rsplit("/", 1)[-1]
         return conformance_errors(value, definitions[reference], definitions, path)
     errors: list[str] = []
+    if "type" in schema:
+        names = schema["type"]
+        allowed = [names] if isinstance(names, str) else list(names)
+        if not any(matches_type(value, str(name)) for name in allowed):
+            errors.append(f"{path}: {type(value).__name__} is not {allowed}")
     if "const" in schema and value != schema["const"]:
         errors.append(f"{path}: {value!r} is not {schema['const']!r}")
     if "enum" in schema and value not in schema["enum"]:
@@ -91,38 +151,79 @@ def conformance_errors(
     if "maxLength" in schema and isinstance(value, str):
         if len(value) > int(schema["maxLength"]):
             errors.append(f"{path}: longer than {schema['maxLength']}")
+    if "minimum" in schema and isinstance(value, (int, float)):
+        if not isinstance(value, bool) and value < schema["minimum"]:
+            errors.append(f"{path}: {value} is below {schema['minimum']}")
     if isinstance(value, dict):
         properties = schema.get("properties", {})
+        additional = schema.get("additionalProperties")
         for key in schema.get("required", []):
             if key not in value:
                 errors.append(f"{path}: missing required key {key}")
         for key, item in value.items():
-            if key not in properties:
-                if schema.get("additionalProperties") is False:
-                    errors.append(f"{path}: undeclared key {key}")
-                continue
-            errors.extend(
-                conformance_errors(item, properties[key], definitions, f"{path}.{key}")
-            )
-    if isinstance(value, list) and "items" in schema:
-        for index, item in enumerate(value):
-            errors.extend(
-                conformance_errors(
-                    item,
-                    schema["items"],
-                    definitions,
-                    f"{path}[{index}]",
+            if key in properties:
+                errors.extend(
+                    conformance_errors(
+                        item,
+                        properties[key],
+                        definitions,
+                        f"{path}.{key}",
+                    )
                 )
-            )
+            elif additional is False:
+                errors.append(f"{path}: undeclared key {key}")
+            elif isinstance(additional, dict):
+                errors.extend(
+                    conformance_errors(
+                        item,
+                        additional,
+                        definitions,
+                        f"{path}.{key}",
+                    )
+                )
+    if isinstance(value, list):
+        if "minItems" in schema and len(value) < int(schema["minItems"]):
+            errors.append(f"{path}: fewer than {schema['minItems']} items")
+        if "items" in schema:
+            for index, item in enumerate(value):
+                errors.extend(
+                    conformance_errors(
+                        item,
+                        schema["items"],
+                        definitions,
+                        f"{path}[{index}]",
+                    )
+                )
+    for index, subschema in enumerate(schema.get("allOf", [])):
+        errors.extend(
+            conformance_errors(value, subschema, definitions, f"{path}/allOf[{index}]")
+        )
+    if "if" in schema:
+        branch = (
+            schema.get("then")
+            if not conformance_errors(value, schema["if"], definitions, path)
+            else schema.get("else")
+        )
+        if isinstance(branch, dict):
+            errors.extend(conformance_errors(value, branch, definitions, path))
+    if "not" in schema:
+        if not conformance_errors(value, schema["not"], definitions, path):
+            errors.append(f"{path}: must not match the forbidden subschema")
     return errors
 
 
 class Harness:
     """Deterministic `session_store_sql` transport backed by a synthetic log."""
 
-    def __init__(self, root: Path, sessions: list[str], page_size: int = 500) -> None:
+    def __init__(
+        self,
+        root: Path,
+        sessions: list[str],
+        page_size: int = 500,
+        run_name: str = "run",
+    ) -> None:
         self.root = root
-        self.run_dir = root / "run"
+        self.run_dir = root / run_name
         self.events_root = root / "session-state"
         self.log = self.events_root / "current" / "events.jsonl"
         self.log.parent.mkdir(parents=True, exist_ok=True)
@@ -132,6 +233,8 @@ class Harness:
         self.spill_dir = root / "spill"
         self.spill_dir.mkdir(exist_ok=True)
         self.discovery_actions: list[str] = []
+        self.call_count = 0
+        self.spill_paths: dict[str, Path] = {}
 
     def batch_sessions(self, query: str) -> list[str]:
         return [session for session in self.sessions if f"'{session}'" in query]
@@ -194,6 +297,8 @@ class Harness:
         action_id = str(action["actionId"])
         if str(action["kind"]) == "discovery":
             self.discovery_actions.append(action_id)
+        self.call_count += 1
+        call_id = f"call-{self.call_count}-{action_id}"
         submitted = query if query is not None else str(action["query"])
         payload = (
             render_result(
@@ -204,8 +309,9 @@ class Harness:
             else error
         )
         if success and spill:
-            spill_path = self.spill_dir / f"{action_id}.txt"
+            spill_path = self.spill_dir / f"{call_id}.txt"
             spill_path.write_text(payload, encoding="utf-8")
+            self.spill_paths[action_id] = spill_path
             payload = f"Output too large to read at once. Saved to: {spill_path}"
         with self.log.open("a", encoding="utf-8") as handle:
             handle.write(
@@ -214,7 +320,7 @@ class Harness:
                         "type": "tool.execution_start",
                         "data": {
                             "toolName": "session_store_sql",
-                            "toolCallId": action_id,
+                            "toolCallId": call_id,
                             "arguments": {
                                 "description": action_id,
                                 "query": submitted,
@@ -229,7 +335,7 @@ class Harness:
                     {
                         "type": "tool.execution_complete",
                         "data": {
-                            "toolCallId": action_id,
+                            "toolCallId": call_id,
                             "success": success,
                             "result": {"content": payload},
                         },
@@ -784,6 +890,210 @@ class ExtractionWorkerTests(unittest.TestCase):
                 definitions,
             ),
         )
+
+
+class ReviewRegressionTests(unittest.TestCase):
+    """Regressions for the findings raised on pull request 42."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def metadata_wave(self, harness: Harness, **options: str) -> dict[str, object]:
+        envelope = harness.start(**options)
+        harness.respond(envelope["wave"]["actions"][0])
+        envelope = harness.advance()
+        self.assertEqual("metadata", envelope["wave"]["actions"][0]["kind"])
+        return envelope
+
+    def test_retriable_failure_never_harvests_its_own_previous_attempt(self) -> None:
+        harness = Harness(self.root, ["session-1"])
+        envelope = self.metadata_wave(harness, session_batch_size="1")
+        metadata = envelope["wave"]["actions"][0]
+
+        harness.respond(metadata, success=False, error="connection reset by peer")
+        envelope = harness.advance()
+
+        self.assertEqual(1, envelope["recorded"]["counts"]["query-failure"])
+        self.assertEqual("wave", envelope["kind"])
+        reissued = envelope["wave"]["actions"][0]
+        self.assertEqual(metadata["actionId"], reissued["actionId"])
+        self.assertEqual(metadata["query"], reissued["query"])
+
+        envelope = harness.advance()
+
+        self.assertEqual("wave", envelope["kind"])
+        self.assertEqual(1, envelope["recorded"]["counts"]["pending"])
+        self.assertEqual(0, envelope["recorded"]["counts"]["query-failure"])
+        self.assertEqual(1, envelope["progress"]["failedQueries"])
+        self.assertEqual(1, envelope["progress"]["batchCount"])
+        self.assertEqual(metadata["actionId"], envelope["wave"]["actions"][0]["actionId"])
+
+        harness.respond(envelope["wave"]["actions"][0])
+        envelope = harness.advance()
+
+        self.assertEqual(1, envelope["recorded"]["counts"]["success"])
+        self.assertEqual("complete", harness.drive(envelope)["status"])
+
+    def test_wave_boundary_is_persisted_per_issued_action(self) -> None:
+        harness = Harness(self.root, ["session-1"])
+        envelope = self.metadata_wave(harness, session_batch_size="1")
+        metadata = envelope["wave"]["actions"][0]
+        harness.respond(metadata, success=False, error="connection reset by peer")
+
+        envelope = harness.advance()
+        worker_state = json.loads(
+            (harness.run_dir / "worker" / "worker-state.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        boundary = worker_state["waveBoundary"]
+        self.assertEqual([metadata["actionId"]], list(boundary))
+        self.assertEqual(1, len(boundary[metadata["actionId"]]))
+
+        terminal = harness.drive(envelope)
+        final = json.loads(
+            (harness.run_dir / "worker" / "worker-state.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual("complete", terminal["status"])
+        self.assertEqual({}, final["waveBoundary"])
+
+    def test_unreadable_spill_file_blocks_instead_of_crashing(self) -> None:
+        harness = Harness(self.root, ["session-1"])
+        envelope = self.metadata_wave(harness, session_batch_size="1")
+        metadata = envelope["wave"]["actions"][0]
+        harness.respond(metadata, spill=True)
+        harness.spill_paths[metadata["actionId"]].write_bytes(b"\xff\xfe not utf-8")
+
+        code, envelope, stderr = harness.invoke(
+            "advance",
+            "--run-dir",
+            str(harness.run_dir),
+            "--events-root",
+            str(harness.events_root),
+        )
+
+        self.assertEqual(0, code, stderr)
+        self.assertEqual("terminal", envelope["kind"])
+        self.assertEqual("blocked", envelope["status"])
+        self.assertTrue(envelope["terminal"])
+        self.assertEqual(1, envelope["recorded"]["counts"]["artifact"])
+        self.assertEqual("artifact", envelope["blocker"]["errorKind"])
+        self.assertIn("could not be read", envelope["blocker"]["reason"])
+
+    def test_probe_result_never_raises_on_an_unreadable_spill_file(self) -> None:
+        spill = self.root / "spill.txt"
+        spill.write_bytes(b"\xff\xfe")
+        events = self.root / "session-state" / "current"
+        events.mkdir(parents=True)
+        (events / "events.jsonl").write_text(
+            json.dumps(
+                {
+                    "type": "tool.execution_complete",
+                    "data": {
+                        "toolCallId": "call-1",
+                        "success": True,
+                        "result": {
+                            "content": f"Output too large to read at once. Saved to: {spill}",
+                            "detailedContent": "SQL (session_store): SELECT 1",
+                        },
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        probe = materializer.probe_result(
+            self.root / "session-state",
+            "SELECT 1",
+            "action-1",
+        )
+
+        self.assertEqual("error", probe["state"])
+        self.assertIn("could not be read", probe["message"])
+        with self.assertRaisesRegex(ValueError, "could not be read"):
+            materializer.result_content(
+                self.root / "session-state",
+                "SELECT 1",
+                "action-1",
+            )
+
+    def test_then_command_is_shell_safe_for_paths_containing_spaces(self) -> None:
+        harness = Harness(self.root, ["session-1"], run_name="forge run dir")
+
+        envelope = harness.start(session_batch_size="1")
+
+        command = envelope["next"]["thenCommand"]
+        self.assertEqual(
+            [
+                "python3",
+                str(SCRIPTS_DIR / "extraction-worker.py"),
+                "advance",
+                "--run-dir",
+                str(harness.run_dir.resolve()),
+            ],
+            shlex.split(command),
+        )
+        self.assertIn("forge run dir", shlex.split(command)[-1])
+        self.assertEqual("complete", harness.drive(envelope)["status"])
+
+    def test_conformance_checker_rejects_what_the_contract_forbids(self) -> None:
+        schemas = json.loads(
+            (SKILL_DIR / "assets" / "schemas.json").read_text(encoding="utf-8")
+        )
+        definitions = schemas["$defs"]
+        harness = Harness(self.root, ["session-1"])
+        valid = harness.start(session_batch_size="1")
+
+        def errors(envelope: dict[str, object]) -> list[str]:
+            return conformance_errors(
+                envelope,
+                definitions["workerEnvelope"],
+                definitions,
+            )
+
+        self.assertEqual([], errors(valid))
+
+        string_cycle = {**valid, "cycle": "2"}
+        zero_actions = {
+            **valid,
+            "wave": {**valid["wave"], "actionCount": 0, "actions": []},
+        }
+        negative_count = {
+            **valid,
+            "recorded": {
+                **valid["recorded"],
+                "counts": {**valid["recorded"]["counts"], "success": -1},
+            },
+        }
+        terminal_with_wave = {
+            **valid,
+            "kind": "terminal",
+            "terminal": True,
+            "ledgerPath": "/tmp/ledger.json",
+        }
+        wrong_enum = {**valid, "status": "finished"}
+        undeclared = {**valid, "surprise": 1}
+
+        self.assertTrue(any("cycle" in error for error in errors(string_cycle)))
+        self.assertTrue(any("items" in error for error in errors(zero_actions)))
+        self.assertTrue(any("below" in error for error in errors(negative_count)))
+        self.assertTrue(
+            any("forbidden" in error for error in errors(terminal_with_wave))
+        )
+        self.assertTrue(any("status" in error for error in errors(wrong_enum)))
+        self.assertTrue(any("surprise" in error for error in errors(undeclared)))
+
+    def test_conformance_checker_rejects_unsupported_schema_keywords(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "unsupported schema keywords"):
+            conformance_errors({"a": 1}, {"patternProperties": {}}, {})
 
 
 class WorkerContractTests(unittest.TestCase):

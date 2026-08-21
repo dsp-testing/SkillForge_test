@@ -24,28 +24,37 @@ block for in-flight tool results, and both accept `--events-root` and `--out`.
 
 1. Probes the current session event log for every action the controller has
    issued, matching on the exact submitted SQL and the action ID passed as
-   `description`.
+   `description`, and ignoring any call that had already completed when the
+   wave was emitted.
 2. Materializes each ready result, following runtime spill receipts, into the
    controller's `outputPath` artifact.
 3. Records outcomes through the controller: successes first, then terminal
    failures, always in issued-action order rather than completion order.
 4. Checkpoints every newly completed batch, converting checkpoint failure into
    a terminal controller blocker.
-5. Generates the next bounded wave, or finalizes, re-checkpoints to attach
-   terminal coverage, and asserts terminal status.
+5. Generates the next bounded wave, records the tool calls already completed
+   for each of its actions, then finalizes, re-checkpoints to attach terminal
+   coverage, and asserts terminal status when no actions remain.
 
 An unresolved action stays `pending`: nothing is recorded, the action stays
 issued, and the identical query is re-emitted in the next wave. A timed-out
 query is recorded as a failure and never re-issued identically.
 
+A retriable failure is different: the controller re-issues the same action ID
+and the same SQL. The wave boundary recorded in step 5 is what keeps that
+retry honest, because without it the next `advance` would match the previous
+attempt's completed call and consume the retry before the new tool call
+finished.
+
 ## Outcome mapping
 
 | Event-log observation | Recorded as |
 | --- | --- |
+| A call that completed before this wave was emitted | ignored entirely |
 | No completed matching call | `pending`, nothing recorded |
 | `success: false` | `record-failure --error-kind auto` with the tool's own error text |
 | Action ID matched, submitted SQL differed | `record-failure --error-kind handoff` |
-| Missing spill file, unparsable table, or rejected result | `record-artifact-failure` |
+| Missing or unreadable spill file, unparsable table, or rejected result | `record-artifact-failure` |
 | Row or artifact limit exceeded | `record-failure` without retry |
 | Parsed rows written | `record-success` |
 
@@ -61,6 +70,8 @@ checkpoint summary, and, for a wave, exactly the arguments needed for each
 hashes, fallback history, and controller internals stay in run-local files:
 
 - `$RUN_DIR/extraction-state.json`: controller state, the only extraction writer;
+- `$RUN_DIR/worker/worker-state.json`: run identity, cycle counters, and the
+  per-action wave boundary of already-completed tool calls;
 - `$RUN_DIR/worker/wave.json`: full action manifest, materializer compatible;
 - `$RUN_DIR/worker/envelope.json`: last emitted envelope;
 - `$RUN_DIR/worker/coverage.json`: complete terminal coverage with omissions;

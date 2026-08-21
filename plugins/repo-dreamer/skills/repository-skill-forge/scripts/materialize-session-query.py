@@ -105,16 +105,17 @@ def failure_message(result: dict[str, Any]) -> str:
     return "session_store_sql call was not explicitly successful"
 
 
-def probe_result(
+def matching_completions(
     events_root: Path,
     sql: str,
-    action_id: str | None = None,
-) -> dict[str, Any]:
-    """Classify the current session's result for one action without raising.
+    action_id: str | None,
+    exclude_call_ids: frozenset[str],
+) -> tuple[bool, list[list[tuple[int, int, str | None, bool | None, dict[str, Any]]]]]:
+    """Group this action's completed calls by match precision.
 
-    States are ``ready`` with materializable ``content``, ``failed`` with the
-    tool's own error ``message``, ``handoff-mismatch``, ``error`` for a broken
-    but present result, and ``missing`` while the tool call has not completed.
+    Group 0 matches an exact tool-call ID, group 1 an exact rendered SQL body,
+    and group 2 a normalized rendered SQL body. The first element is ``True``
+    when the newest start carrying this action ID submitted different SQL.
     """
     event_files = sorted(
         events_root.glob("*/events.jsonl"),
@@ -134,6 +135,8 @@ def probe_result(
                 continue
             arguments = data.get("arguments")
             call_id = data.get("toolCallId")
+            if isinstance(call_id, str) and call_id in exclude_call_ids:
+                continue
             if (
                 action_id is not None
                 and data.get("toolName") == "session_store_sql"
@@ -163,17 +166,12 @@ def probe_result(
             key=lambda start: (-start[0], start[1]),
         )
         if normalize_sql(submitted_sql) != normalized_sql:
-            return {
-                "state": "handoff-mismatch",
-                "message": (
-                    f"session_store_sql query handoff mismatch for action {action_id}"
-                ),
-            }
+            return True, [[], [], []]
         exact_call_ids.add(described_call_id)
 
     matching_call_ids = exact_call_ids or normalized_call_ids
     match_groups: list[
-        list[tuple[int, int, bool | None, dict[str, Any]]]
+        list[tuple[int, int, str | None, bool | None, dict[str, Any]]]
     ] = [[], [], []]
     for file_index, event_file in enumerate(event_files):
         for event_index, event in enumerate(read_events(event_file)):
@@ -186,9 +184,12 @@ def probe_result(
             if not isinstance(result, dict):
                 continue
             call_id = data.get("toolCallId")
-            if isinstance(call_id, str) and call_id in matching_call_ids:
+            if isinstance(call_id, str) and call_id in exclude_call_ids:
+                continue
+            identity = call_id if isinstance(call_id, str) else None
+            if identity is not None and identity in matching_call_ids:
                 match_groups[0].append(
-                    (file_index, event_index, data.get("success"), result)
+                    (file_index, event_index, identity, data.get("success"), result)
                 )
                 continue
             detailed = result.get("detailedContent")
@@ -205,20 +206,67 @@ def probe_result(
             )
             if rendered_sql == sql:
                 match_groups[1].append(
-                    (file_index, event_index, data.get("success"), result)
+                    (file_index, event_index, identity, data.get("success"), result)
                 )
             elif (
                 isinstance(rendered_sql, str)
                 and normalize_sql(rendered_sql) == normalized_sql
             ):
                 match_groups[2].append(
-                    (file_index, event_index, data.get("success"), result)
+                    (file_index, event_index, identity, data.get("success"), result)
                 )
+    return False, match_groups
 
+
+def observed_call_ids(
+    events_root: Path,
+    sql: str,
+    action_id: str | None = None,
+) -> list[str]:
+    """Tool-call IDs already completed for this action, for wave boundaries."""
+    _, match_groups = matching_completions(events_root, sql, action_id, frozenset())
+    return sorted(
+        {
+            call_id
+            for matches in match_groups
+            for _, _, call_id, _, _ in matches
+            if call_id
+        }
+    )
+
+
+def probe_result(
+    events_root: Path,
+    sql: str,
+    action_id: str | None = None,
+    exclude_call_ids: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """Classify the current session's result for one action without raising.
+
+    States are ``ready`` with materializable ``content``, ``failed`` with the
+    tool's own error ``message``, ``handoff-mismatch``, ``error`` for a broken
+    but present result, and ``missing`` while the tool call has not completed.
+
+    ``exclude_call_ids`` drops calls that completed before the current wave was
+    emitted, so a re-issued action never harvests its own previous attempt.
+    """
+    handoff, match_groups = matching_completions(
+        events_root,
+        sql,
+        action_id,
+        exclude_call_ids,
+    )
+    if handoff:
+        return {
+            "state": "handoff-mismatch",
+            "message": (
+                f"session_store_sql query handoff mismatch for action {action_id}"
+            ),
+        }
     selected: tuple[bool | None, dict[str, Any]] | None = None
     for matches in match_groups:
         if matches:
-            _, _, success, result = max(
+            _, _, _, success, result = max(
                 matches,
                 key=lambda match: (-match[0], match[1]),
             )
@@ -248,7 +296,16 @@ def probe_result(
                 "state": "error",
                 "message": f"session_store_sql spill file not found: {spill_path}",
             }
-        return {"state": "ready", "content": spill_path.read_text(encoding="utf-8")}
+        try:
+            content = spill_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            return {
+                "state": "error",
+                "message": (
+                    "session_store_sql spill file could not be read: "
+                    f"{spill_path}: {error}"
+                ),
+            }
     return {"state": "ready", "content": content}
 
 
