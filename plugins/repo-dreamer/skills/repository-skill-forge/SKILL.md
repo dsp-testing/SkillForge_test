@@ -48,6 +48,12 @@ window or reconstruct prior evidence.
 Run-local extraction state under `runDir` is required for resumability. It is
 ephemeral execution state, not cross-run Forge memory.
 
+A run-local completion marker under `$FORGE_MARKER_DIR` (default
+`/tmp/copilot-skill-forge`) lets an opt-in Copilot coding agent completion guard
+verify terminal status without model memory. It is process-local, never written
+into the checkout, and never carries evidence across runs. See
+`reference/cca-completion-guard.md` for the command and configuration contract.
+
 ## Policy
 
 ### 1. Establish the fixed window and PR catalog
@@ -95,6 +101,16 @@ python3 "$SKILL_DIR/scripts/extraction-worker.py" start \
   --main-branch "$DEFAULT_BRANCH"
 ```
 
+Immediately after `start` creates run-local state, publish the run marker so
+completion can be verified from state rather than from memory:
+
+```bash
+python3 "$SKILL_DIR/scripts/run-marker.py" init \
+  --state "$RUN_DIR/extraction-state.json" \
+  --checkpoint "$RUN_DIR/checkpoint-summary.json" \
+  --ledger "$RUN_DIR/primitives.sanitized.json"
+```
+
 Every command prints one `workerEnvelope` (`assets/schemas.json`). While `kind`
 is `wave`, call `session_store_sql` once per entry in `wave.actions`, passing
 that entry's `description` and `query` unchanged, executing the wave's calls
@@ -102,6 +118,13 @@ concurrently, then run:
 
 ```bash
 python3 "$SKILL_DIR/scripts/extraction-worker.py" advance --run-dir "$RUN_DIR"
+```
+
+Refresh the run marker immediately after every `advance` so its diagnostic
+snapshot always reflects the persisted controller and checkpoint state:
+
+```bash
+python3 "$SKILL_DIR/scripts/run-marker.py" refresh
 ```
 
 Repeat until `kind` is `terminal`. Optionally add `--wait 120` to `advance` to
@@ -159,6 +182,10 @@ raw artifacts, and attaches final extraction coverage once the controller is
 terminal. A checkpoint failure becomes a terminal controller blocker so it can
 never be mistaken for unfinished `running` extraction.
 
+Each checkpoint is also written to `$RUN_DIR/checkpoint-summary.json`, so the
+run marker's diagnostic snapshot reports current checkpoint coverage rather than
+model recollection.
+
 Immediately before any final response, publication decision, or run-directory
 cleanup, require:
 
@@ -166,6 +193,16 @@ cleanup, require:
 python3 "$SKILL_DIR/scripts/extraction-worker.py" status \
   --run-dir "$RUN_DIR" --assert-terminal
 ```
+
+Only once that command succeeds, record the terminal summary in the marker:
+
+```bash
+python3 "$SKILL_DIR/scripts/run-marker.py" finish
+```
+
+Remove the marker with `run-marker.py clear` only when `$RUN_DIR` is discarded.
+It refuses to clear a marker that has not reached the terminal phase, and has no
+override flag.
 
 If this fails because status is `running`, a final response and cleanup are
 forbidden. Read `pendingActionIds` from its envelope, execute the outstanding
@@ -374,6 +411,12 @@ Forge PR. The final report must derive its extraction status from a successful
 `extraction-worker.py status --assert-terminal` result. It must never report
 `BLOCKED` when that command fails because status is `running`.
 
+An opt-in coding agent completion guard may run `completion-predicate.py` when
+the agent tries to stop. It enforces the same invariant rather than replacing
+it: the guard is satisfied only by terminal `complete` or `partial` controller
+status, and reports `incomplete` with the pending action IDs or the exact
+blocker for every other state.
+
 Fail explicitly on undisclosed omissions, malformed PR metadata, leakage,
 unsafe proposals, missing required publication tools, or blocked publication.
 Label tools are optional and must never interrupt extraction, publication, or a
@@ -387,7 +430,12 @@ tool-call, output, context, or automation limit.
 - `scripts/extraction-worker.py`: deterministic extraction driver, bounded
   worker protocol, and terminal assertion.
 - `scripts/extraction-controller.py`: resumable run-local extraction state,
-  fast primary queries, and explicit partial omissions.
+  fast primary queries, explicit partial omissions, and the machine-readable
+  `diagnostics` snapshot.
+- `scripts/run-marker.py`: run-local completion marker lifecycle and the stable
+  completion-guard launcher.
+- `scripts/completion-predicate.py`: deterministic, side-effect-free coding
+  agent completion verdict derived from controller state.
 - `scripts/materialize-session-query.py`: exact current-session result
   materialization into controller JSON artifacts.
 - `scripts/checkpoint-completed-batches.py`: idempotent progressive
@@ -405,6 +453,8 @@ tool-call, output, context, or automation limit.
   cycle reduction, and the bounded per-action fallback.
 - `prompts/author-pr-body.md`: plain-language PR body contract.
 - `prompts/review-pr-body.md`: final PR body evidence and safety review.
+- `reference/cca-completion-guard.md`: coding agent completion guard command,
+  environment, verdict, and configuration contract.
 - `assets/schemas.json`: extraction, worker protocol, candidate, and PR
   metadata contracts.
 

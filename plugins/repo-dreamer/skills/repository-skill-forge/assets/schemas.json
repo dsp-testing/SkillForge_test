@@ -445,6 +445,179 @@
         "updatedAt": { "type": "string" }
       },
       "additionalProperties": false
+    },
+    "extractionDiagnostics": {
+      "type": "object",
+      "required": [
+        "kind",
+        "schemaVersion",
+        "status",
+        "terminal",
+        "consistent",
+        "counters",
+        "actions",
+        "sessions",
+        "batches",
+        "partitions",
+        "coverage"
+      ],
+      "properties": {
+        "kind": { "const": "extraction-diagnostics" },
+        "schemaVersion": { "const": 1 },
+        "status": { "enum": ["running", "complete", "partial", "blocked"] },
+        "terminal": { "type": "boolean" },
+        "consistent": { "type": "boolean" },
+        "invariantError": { "type": ["string", "null"] },
+        "repository": { "type": ["string", "null"] },
+        "windowStart": { "type": ["string", "null"] },
+        "windowEnd": { "type": ["string", "null"] },
+        "runDir": { "type": ["string", "null"] },
+        "counters": {
+          "type": "object",
+          "required": [
+            "queryAttempts",
+            "successfulQueries",
+            "failedQueries",
+            "rows",
+            "toolCalls",
+            "artifactBytes"
+          ],
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        },
+        "actions": {
+          "type": "object",
+          "required": [
+            "issuedActionIds",
+            "issuedActionCount",
+            "pendingActionIds",
+            "pendingActionCount",
+            "handledActionCount",
+            "retryCount"
+          ],
+          "properties": {
+            "issuedActionIds": { "type": "array", "items": { "type": "string" } },
+            "issuedActionCount": { "type": "integer", "minimum": 0 },
+            "pendingActionIds": { "type": "array", "items": { "type": "string" } },
+            "pendingActionCount": { "type": "integer", "minimum": 0 },
+            "handledActionCount": { "type": "integer", "minimum": 0 },
+            "retryCount": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "sessions": {
+          "type": "object",
+          "required": ["discovered", "completed", "omittedUnits", "omittedUnitKinds"],
+          "properties": {
+            "discovered": { "type": "integer", "minimum": 0 },
+            "completed": { "type": "integer", "minimum": 0 },
+            "omittedUnits": { "type": "integer", "minimum": 0 },
+            "omittedUnitKinds": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        },
+        "batches": {
+          "type": "object",
+          "required": ["total", "complete", "omitted", "pending", "byStatus"],
+          "properties": {
+            "total": { "type": "integer", "minimum": 0 },
+            "complete": { "type": "integer", "minimum": 0 },
+            "omitted": { "type": "integer", "minimum": 0 },
+            "pending": { "type": "integer", "minimum": 0 },
+            "byStatus": {
+              "type": "object",
+              "additionalProperties": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "additionalProperties": false
+        },
+        "partitions": {
+          "type": "object",
+          "required": ["total", "discoveryComplete", "pendingDiscovery", "omitted"],
+          "properties": {
+            "total": { "type": "integer", "minimum": 0 },
+            "discoveryComplete": { "type": "integer", "minimum": 0 },
+            "pendingDiscovery": { "type": "integer", "minimum": 0 },
+            "omitted": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "discoveryComplete": { "type": "boolean" },
+        "coverage": {
+          "type": "object",
+          "required": [
+            "sessionCoverage",
+            "sessionCoverageStatus",
+            "toolEventFallbackEnabled",
+            "fallbackCount",
+            "finalized"
+          ],
+          "properties": {
+            "sessionCoverage": { "type": ["number", "null"] },
+            "sessionCoverageStatus": { "enum": ["known", "unknown"] },
+            "toolEventFallbackEnabled": { "type": "boolean" },
+            "fallbackCount": { "type": "integer", "minimum": 0 },
+            "finalized": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        "checkpoint": { "type": ["object", "null"] },
+        "blocker": { "type": ["object", "null"] },
+        "blockerCount": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "runMarker": {
+      "type": "object",
+      "required": [
+        "kind",
+        "schemaVersion",
+        "runId",
+        "repository",
+        "runDir",
+        "statePath",
+        "phase",
+        "revision",
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "kind": { "const": "repository-skill-forge-run-marker" },
+        "schemaVersion": { "const": 1 },
+        "runId": { "type": "string", "minLength": 1 },
+        "repository": { "type": "string", "minLength": 1 },
+        "runDir": { "type": "string", "minLength": 1 },
+        "statePath": { "type": "string", "minLength": 1 },
+        "checkpointPath": { "type": ["string", "null"] },
+        "ledgerPath": { "type": ["string", "null"] },
+        "skillDir": { "type": ["string", "null"] },
+        "predicatePath": { "type": ["string", "null"] },
+        "phase": { "enum": ["active", "terminal"] },
+        "revision": { "type": "integer", "minimum": 0 },
+        "pid": { "type": "integer" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "snapshot": {
+          "oneOf": [{ "$ref": "#/$defs/extractionDiagnostics" }, { "type": "null" }]
+        },
+        "terminalSummary": { "type": ["object", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "completionVerdict": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": { "enum": ["complete", "incomplete"] },
+        "reason": { "type": "string" },
+        "continuePrompt": { "type": "string" }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "incomplete" } } },
+          "then": { "required": ["status", "reason", "continuePrompt"] }
+        }
+      ]
     }
   }
 }

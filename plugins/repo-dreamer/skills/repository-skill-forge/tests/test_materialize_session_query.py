@@ -759,6 +759,155 @@ class MaterializeSessionQueryTests(unittest.TestCase):
         self.assertEqual(1, primitives[0]["exitCode"])
         self.assertEqual("failure", primitives[0]["outcome"])
 
+    def test_table_rows_without_query_source_column_is_unchanged(self) -> None:
+        content = "\n".join(
+            [
+                "1 row(s) returned:",
+                "",
+                "| session_id | updated_at |",
+                "| --- | --- |",
+                "| session-1 | 2026-08-01T00:00:00Z |",
+            ]
+        )
+
+        header, rows = materializer.table_rows(content)
+
+        self.assertEqual(["session_id", "updated_at"], header)
+        parsed = materializer.parse_rows("discovery", header, rows)
+        self.assertEqual(
+            [{"session_id": "session-1", "updated_at": "2026-08-01T00:00:00Z"}],
+            parsed,
+        )
+
+    def test_table_rows_strips_trailing_query_source_column(self) -> None:
+        content = "\n".join(
+            [
+                "1 row(s) returned:",
+                "",
+                "| session_id | updated_at | _query_source |",
+                "| --- | --- | --- |",
+                "| session-1 | 2026-08-01T00:00:00Z | cloud |",
+            ]
+        )
+
+        header, rows = materializer.table_rows(content)
+
+        self.assertEqual(["session_id", "updated_at"], header)
+        self.assertEqual(["session-1 | 2026-08-01T00:00:00Z"], rows)
+        parsed = materializer.parse_rows("discovery", header, rows)
+        self.assertEqual(
+            [{"session_id": "session-1", "updated_at": "2026-08-01T00:00:00Z"}],
+            parsed,
+        )
+
+    def test_table_rows_rejects_unknown_trailing_column(self) -> None:
+        content = "\n".join(
+            [
+                "1 row(s) returned:",
+                "",
+                "| session_id | updated_at | extra_column |",
+                "| --- | --- | --- |",
+                "| session-1 | 2026-08-01T00:00:00Z | mystery |",
+            ]
+        )
+
+        header, rows = materializer.table_rows(content)
+
+        self.assertEqual(["session_id", "updated_at", "extra_column"], header)
+        with self.assertRaisesRegex(
+            ValueError, "unexpected discovery result columns"
+        ):
+            materializer.parse_rows("discovery", header, rows)
+
+    def test_table_rows_rejects_query_source_when_not_trailing(self) -> None:
+        content = "\n".join(
+            [
+                "1 row(s) returned:",
+                "",
+                "| session_id | _query_source | updated_at |",
+                "| --- | --- | --- |",
+                "| session-1 | cloud | 2026-08-01T00:00:00Z |",
+            ]
+        )
+
+        header, rows = materializer.table_rows(content)
+
+        self.assertEqual(["session_id", "_query_source", "updated_at"], header)
+        with self.assertRaisesRegex(
+            ValueError, "unexpected discovery result columns"
+        ):
+            materializer.parse_rows("discovery", header, rows)
+
+    def test_query_source_stripping_preserves_embedded_pipes(self) -> None:
+        content = "\n".join(
+            [
+                "1 row(s) returned:",
+                "",
+                "| session_id | tool_call_id | tool_name | arguments_json | "
+                "exit_code | completed_at | _query_source |",
+                "| --- | --- | --- | --- | --- | --- | --- |",
+                '| session-1 | call-1 | bash | {"command":"printf \\"a | '
+                'b\\\\n\\""} | 0 | 2026-08-01T00:00:01Z | cloud |',
+            ]
+        )
+
+        header, rows = materializer.table_rows(content)
+
+        self.assertEqual(
+            [
+                "session_id",
+                "tool_call_id",
+                "tool_name",
+                "arguments_json",
+                "exit_code",
+                "completed_at",
+            ],
+            header,
+        )
+        parsed = materializer.parse_rows("tool-calls", header, rows)
+        self.assertEqual(1, len(parsed))
+        self.assertEqual(
+            {"command": 'printf "a | b\\n"'},
+            json.loads(parsed[0]["arguments_json"]),
+        )
+        self.assertEqual(0, parsed[0]["exit_code"])
+        self.assertEqual("2026-08-01T00:00:01Z", parsed[0]["completed_at"])
+
+    def test_table_rows_strips_query_source_with_zero_rows(self) -> None:
+        content = "\n".join(
+            [
+                "0 row(s) returned:",
+                "",
+                "| session_id | updated_at | _query_source |",
+                "| --- | --- | --- |",
+            ]
+        )
+
+        header, rows = materializer.table_rows(content)
+
+        self.assertEqual(["session_id", "updated_at"], header)
+        self.assertEqual([], rows)
+        self.assertEqual([], materializer.parse_rows("discovery", header, rows))
+
+    def test_malformed_row_missing_query_source_cell_raises_downstream(
+        self,
+    ) -> None:
+        content = "\n".join(
+            [
+                "1 row(s) returned:",
+                "",
+                "| session_id | updated_at | _query_source |",
+                "| --- | --- | --- |",
+                "| session-1 | 2026-08-01T00:00:00Z |",
+            ]
+        )
+
+        header, rows = materializer.table_rows(content)
+
+        self.assertEqual(["session_id", "updated_at"], header)
+        with self.assertRaises(ValueError):
+            materializer.parse_rows("discovery", header, rows)
+
 
 if __name__ == "__main__":
     unittest.main()
