@@ -193,11 +193,17 @@ def checkpoint(
         merger.apply_extraction_coverage(ledger, state)
         write_json(ledger_path, ledger)
 
+    completed = completed_batches(state)
     return {
         "checkpointedBatchIds": checkpointed,
         "processedBatchIds": sorted(processed),
         "ledgerPath": str(ledger_path),
         "terminalCoverageAttached": state.get("status") in {"complete", "partial"},
+        "checkpointedBatchCount": len(checkpointed),
+        "processedBatchCount": len(processed),
+        "completedBatchCount": len(completed),
+        "ledgerBytes": ledger_path.stat().st_size if ledger_path.is_file() else 0,
+        "extractionStatus": state.get("status"),
     }
 
 
