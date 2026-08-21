@@ -236,7 +236,7 @@ def counter_snapshot(state: dict[str, Any]) -> dict[str, int]:
     recorded = state.get("workCounters")
     if isinstance(recorded, dict):
         for key, value in recorded.items():
-            if isinstance(value, int) and not isinstance(value, bool):
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                 counters[str(key)] = value
     return counters
 

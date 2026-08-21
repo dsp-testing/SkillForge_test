@@ -12,6 +12,7 @@ sys.dont_write_bytecode = True
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -71,8 +72,15 @@ def emit(payload: Any, out: str | None) -> None:
         print(json.dumps(payload, indent=2))
 
 
+def load_marker(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
+    """Reject an untrusted marker directory before reading anything it contains."""
+    marker_path = forge_marker.resolve_marker_path(args.marker, args.marker_dir)
+    forge_marker.assert_private_directory(marker_path.parent)
+    return marker_path, forge_marker.read_marker(marker_path)
+
+
 def command_init(args: argparse.Namespace) -> dict[str, Any]:
-    state_path = Path(args.state).expanduser().resolve()
+    state_path = forge_marker.absolute(args.state)
     state = read_state(state_path)
     marker_path = forge_marker.resolve_marker_path(args.marker, args.marker_dir)
     marker = forge_marker.build_marker(
@@ -84,6 +92,7 @@ def command_init(args: argparse.Namespace) -> dict[str, Any]:
         skill_dir=SKILL_DIR,
         predicate_path=PREDICATE_PATH,
     )
+    reject_foreign_active_run(marker_path, marker["runId"])
     marker["snapshot"] = snapshot_for(marker, state)
     forge_marker.write_marker(marker_path, marker)
     launcher = forge_marker.install_launcher(
@@ -99,9 +108,28 @@ def command_init(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def reject_foreign_active_run(marker_path: Path, run_id: str) -> None:
+    """One marker location owns one run, so never displace another active run."""
+    if not os.path.lexists(marker_path):
+        return
+    forge_marker.assert_private_directory(marker_path.parent)
+    try:
+        existing = forge_marker.read_marker(marker_path)
+    except forge_marker.MarkerError:
+        return
+    if (
+        existing.get("phase") == forge_marker.ACTIVE_PHASE
+        and existing.get("runId") != run_id
+    ):
+        raise ValueError(
+            f"run marker {marker_path} already belongs to active run "
+            f"{existing.get('runId')}; finish that run, or give this run its own "
+            f"location with --marker-dir or {forge_marker.MARKER_DIR_ENV}"
+        )
+
+
 def command_refresh(args: argparse.Namespace) -> dict[str, Any]:
-    marker_path = forge_marker.resolve_marker_path(args.marker, args.marker_dir)
-    marker = forge_marker.read_marker(marker_path)
+    marker_path, marker = load_marker(args)
     state = read_state(marker["statePath"])
     updated = forge_marker.advance_marker(
         marker,
@@ -114,8 +142,7 @@ def command_refresh(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def command_finish(args: argparse.Namespace) -> dict[str, Any]:
-    marker_path = forge_marker.resolve_marker_path(args.marker, args.marker_dir)
-    marker = forge_marker.read_marker(marker_path)
+    marker_path, marker = load_marker(args)
     state = read_state(marker["statePath"])
     summary = controller.terminal_summary(state)
     updated = forge_marker.advance_marker(
@@ -133,9 +160,10 @@ def command_finish(args: argparse.Namespace) -> dict[str, Any]:
 def command_clear(args: argparse.Namespace) -> dict[str, Any]:
     marker_path = forge_marker.resolve_marker_path(args.marker, args.marker_dir)
     launcher_path = marker_path.parent / forge_marker.LAUNCHER_FILENAME
-    if marker_path.exists():
+    if os.path.lexists(marker_path):
+        forge_marker.assert_private_directory(marker_path.parent)
         marker = forge_marker.read_marker(marker_path)
-        if marker.get("phase") != forge_marker.TERMINAL_PHASE and not args.force:
+        if marker.get("phase") != forge_marker.TERMINAL_PHASE:
             raise ValueError(
                 "refusing to clear an active run marker before terminal assertion; "
                 "run `run-marker.py finish` after `assert-terminal` succeeds"
@@ -154,8 +182,8 @@ def command_clear(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def command_show(args: argparse.Namespace) -> dict[str, Any]:
-    marker_path = forge_marker.resolve_marker_path(args.marker, args.marker_dir)
-    return {"markerPath": str(marker_path), "marker": forge_marker.read_marker(marker_path)}
+    marker_path, marker = load_marker(args)
+    return {"markerPath": str(marker_path), "marker": marker}
 
 
 def add_marker_arguments(parser: argparse.ArgumentParser) -> None:
@@ -186,7 +214,6 @@ def main() -> None:
     add_marker_arguments(finish)
 
     clear = subparsers.add_parser("clear")
-    clear.add_argument("--force", action="store_true")
     clear.add_argument("--purge", action="store_true")
     add_marker_arguments(clear)
 

@@ -109,13 +109,25 @@ The predicate is deterministic and side-effect free. All writes happen in
 | Before discarding `$RUN_DIR` | `run-marker.py clear` |
 
 `clear` refuses to run while the marker phase is still `active`, so the marker
-cannot be removed before terminal assertion. It leaves the launcher in place so
-the configured command keeps returning `{"status":"complete"}` afterwards. Pass
-`--purge` to remove the launcher too.
+cannot be removed before terminal assertion. There is deliberately no override
+flag: an escape hatch that removed an active marker would let the permissive
+launcher report `complete` mid-run, which is the exact failure this guard
+prevents. `clear` leaves the launcher in place so the configured command keeps
+returning `{"status":"complete"}` afterwards. Pass `--purge` to remove the
+launcher too, which is also refused while the marker is active.
+
+One marker location owns one run. `init` refuses to displace a marker that is
+still `active` and belongs to a different run, so a second concurrent run cannot
+silently retarget the first run's stop hook at its own state. Re-running `init`
+for the same run is idempotent. If two Forge runs really must share a container,
+give each its own location with `--marker-dir` or `FORGE_MARKER_DIR`.
 
 `refresh` and `finish` locate the controller state through the marker, not
 through model memory, and rewrite the marker atomically with an incremented
-`revision`.
+`revision`. Both validate the marker directory before reading anything inside
+it. Marker paths from flags or the environment are normalized to absolute paths
+without resolving symlinks, so the launcher resolves the same marker regardless
+of the working directory it is invoked from.
 
 ## Snapshot fields
 

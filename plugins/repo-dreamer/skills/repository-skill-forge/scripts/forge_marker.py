@@ -43,14 +43,19 @@ class MarkerError(ValueError):
     """A run marker is unreadable, unsupported, or internally inconsistent."""
 
 
+def absolute(path: str | os.PathLike[str]) -> Path:
+    """Expand and normalize to an absolute path without resolving symlinks."""
+    return Path(os.path.abspath(os.path.expanduser(str(path))))
+
+
 def resolve_marker_dir(
     explicit: str | os.PathLike[str] | None = None,
     environ: dict[str, str] | None = None,
 ) -> Path:
     values = os.environ if environ is None else environ
     if explicit:
-        return Path(explicit).expanduser()
-    return Path(values.get(MARKER_DIR_ENV) or DEFAULT_MARKER_DIR).expanduser()
+        return absolute(explicit)
+    return absolute(values.get(MARKER_DIR_ENV) or DEFAULT_MARKER_DIR)
 
 
 def resolve_marker_path(
@@ -60,12 +65,12 @@ def resolve_marker_path(
 ) -> Path:
     values = os.environ if environ is None else environ
     if explicit:
-        return Path(explicit).expanduser()
+        return absolute(explicit)
     if marker_dir:
         return resolve_marker_dir(marker_dir, values) / MARKER_FILENAME
     from_environment = values.get(MARKER_PATH_ENV)
     if from_environment:
-        return Path(from_environment).expanduser()
+        return absolute(from_environment)
     return resolve_marker_dir(None, values) / MARKER_FILENAME
 
 
@@ -95,7 +100,8 @@ def assert_private_directory(directory: Path) -> Path:
 
 
 def ensure_private_directory(directory: Path) -> Path:
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not os.path.lexists(directory):
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     return assert_private_directory(directory)
 
 
@@ -115,7 +121,7 @@ def run_id_for(state: dict[str, Any]) -> str:
 
 
 def optional_path(value: str | os.PathLike[str] | None) -> str | None:
-    return str(Path(value).expanduser()) if value else None
+    return str(absolute(value)) if value else None
 
 
 def build_marker(
@@ -145,7 +151,7 @@ def build_marker(
         "runId": run_id or run_id_for(state),
         "repository": repository,
         "runDir": run_dir,
-        "statePath": str(Path(state_path).expanduser().resolve()),
+        "statePath": str(absolute(state_path)),
         "checkpointPath": optional_path(checkpoint_path),
         "ledgerPath": optional_path(ledger_path),
         "skillDir": optional_path(skill_dir),

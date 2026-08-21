@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -181,6 +183,18 @@ class DiagnosticsSnapshotTests(unittest.TestCase):
             self.assertEqual(["batch-1"], snapshot["checkpoint"]["checkpointedBatchIds"])
             self.assertEqual(42, snapshot["checkpoint"]["ledgerBytes"])
 
+    def test_corrupt_counters_never_produce_a_negative_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = discovered_state(run_dir)
+            state["workCounters"]["rows"] = -5
+            state["workCounters"]["toolCalls"] = "12"
+
+            counters = controller.diagnostics(state)["counters"]
+
+            self.assertEqual(0, counters["rows"])
+            self.assertEqual(0, counters["toolCalls"])
+            self.assertTrue(all(count >= 0 for count in counters.values()))
+
 
 class RunMarkerTests(unittest.TestCase):
     def marker_for(self, run_dir: str, marker_dir: str, state: dict) -> tuple[Path, dict]:
@@ -327,6 +341,52 @@ class RunMarkerTests(unittest.TestCase):
             with self.assertRaisesRegex(forge_marker.MarkerError, "unusable"):
                 forge_marker.assert_private_directory(missing)
             self.assertFalse(missing.exists())
+
+    def test_dangling_symlink_directory_raises_marker_error(self) -> None:
+        with tempfile.TemporaryDirectory() as base:
+            link = Path(base) / "link"
+            link.symlink_to(Path(base) / "missing", target_is_directory=True)
+
+            with self.assertRaises(forge_marker.MarkerError):
+                forge_marker.ensure_private_directory(link)
+            self.assertFalse((Path(base) / "missing").exists())
+
+    def test_symlink_to_a_file_raises_marker_error(self) -> None:
+        with tempfile.TemporaryDirectory() as base:
+            target = Path(base) / "file"
+            target.write_text("x", encoding="utf-8")
+            link = Path(base) / "link"
+            link.symlink_to(target)
+
+            with self.assertRaises(forge_marker.MarkerError):
+                forge_marker.ensure_private_directory(link)
+
+    def test_resolved_marker_paths_are_always_absolute(self) -> None:
+        relative_dir = forge_marker.resolve_marker_path(None, "relative-dir", {})
+        relative_marker = forge_marker.resolve_marker_path("relative.json", None, {})
+        from_environment = forge_marker.resolve_marker_path(
+            None,
+            None,
+            {forge_marker.MARKER_PATH_ENV: "relative-env.json"},
+        )
+
+        for candidate in (relative_dir, relative_marker, from_environment):
+            self.assertTrue(candidate.is_absolute(), candidate)
+        self.assertEqual(
+            Path.cwd() / "relative-dir" / forge_marker.MARKER_FILENAME,
+            relative_dir,
+        )
+
+    def test_absolute_normalizes_without_resolving_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as base:
+            real = Path(base) / "real"
+            real.mkdir()
+            link = Path(base) / "link"
+            link.symlink_to(real, target_is_directory=True)
+
+            resolved = forge_marker.absolute(link / "run-marker.json")
+
+            self.assertEqual(link / "run-marker.json", resolved)
 
 
 class CompletionPredicateTests(unittest.TestCase):
@@ -611,6 +671,103 @@ def tree_snapshot(root: Path) -> dict[str, tuple[int, int]]:
     }
 
 
+JSON_TYPES = {
+    "object": dict,
+    "array": list,
+    "string": str,
+    "boolean": bool,
+    "null": type(None),
+}
+
+
+def matches_type(value, name: str) -> bool:
+    if name == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if name == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if name == "boolean":
+        return isinstance(value, bool)
+    expected = JSON_TYPES.get(name)
+    if expected is None:
+        return True
+    if expected in (dict, list, str) and isinstance(value, bool):
+        return False
+    return isinstance(value, expected)
+
+
+def schema_errors(value, schema: dict, root: dict, path: str = "$") -> list[str]:
+    """Validate the JSON Schema keywords actually used by assets/schemas.json."""
+    if "$ref" in schema:
+        pointer = schema["$ref"]
+        if not pointer.startswith("#/"):
+            return [f"{path}: unsupported $ref {pointer}"]
+        target = root
+        for part in pointer[2:].split("/"):
+            target = target[part]
+        return schema_errors(value, target, root, path)
+
+    errors: list[str] = []
+
+    if "const" in schema and value != schema["const"]:
+        errors.append(f"{path}: expected const {schema['const']!r}, got {value!r}")
+    if "enum" in schema and value not in schema["enum"]:
+        errors.append(f"{path}: {value!r} is not one of {schema['enum']}")
+
+    declared = schema.get("type")
+    if declared is not None:
+        names = declared if isinstance(declared, list) else [declared]
+        if not any(matches_type(value, name) for name in names):
+            errors.append(f"{path}: expected type {declared}, got {type(value).__name__}")
+            return errors
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in schema and value < schema["minimum"]:
+            errors.append(f"{path}: {value} is below minimum {schema['minimum']}")
+    if isinstance(value, str):
+        if "minLength" in schema and len(value) < schema["minLength"]:
+            errors.append(f"{path}: shorter than minLength {schema['minLength']}")
+        if "pattern" in schema and not re.search(schema["pattern"], value):
+            errors.append(f"{path}: does not match pattern {schema['pattern']}")
+
+    if isinstance(value, list):
+        if "minItems" in schema and len(value) < schema["minItems"]:
+            errors.append(f"{path}: fewer than minItems {schema['minItems']}")
+        if schema.get("uniqueItems") and len(value) != len({json.dumps(i, sort_keys=True) for i in value}):
+            errors.append(f"{path}: items are not unique")
+        if "items" in schema:
+            for index, item in enumerate(value):
+                errors.extend(schema_errors(item, schema["items"], root, f"{path}[{index}]"))
+
+    if isinstance(value, dict):
+        properties = schema.get("properties", {})
+        for key in schema.get("required", []):
+            if key not in value:
+                errors.append(f"{path}: missing required property {key!r}")
+        additional = schema.get("additionalProperties")
+        for key, item in value.items():
+            if key in properties:
+                errors.extend(schema_errors(item, properties[key], root, f"{path}.{key}"))
+            elif additional is False:
+                errors.append(f"{path}: undeclared property {key!r}")
+            elif isinstance(additional, dict):
+                errors.extend(schema_errors(item, additional, root, f"{path}.{key}"))
+
+    if "oneOf" in schema:
+        matched = sum(
+            1 for option in schema["oneOf"] if not schema_errors(value, option, root, path)
+        )
+        if matched != 1:
+            errors.append(f"{path}: matched {matched} oneOf branches, expected exactly 1")
+    for option in schema.get("allOf", []):
+        if "if" in option:
+            if not schema_errors(value, option["if"], root, path):
+                errors.extend(schema_errors(value, option.get("then", {}), root, path))
+        else:
+            errors.extend(schema_errors(value, option, root, path))
+
+    return errors
+
+
 class CompletionGuardCommandTests(unittest.TestCase):
     def environment(self) -> dict[str, str]:
         values = dict(os.environ)
@@ -761,6 +918,65 @@ class CompletionGuardCommandTests(unittest.TestCase):
             self.assertEqual(before, tree_snapshot(SKILL_DIR))
             self.assertEqual([], list(SKILL_DIR.rglob("__pycache__")))
 
+    def test_clear_has_no_force_escape_hatch(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir, tempfile.TemporaryDirectory() as marker_dir:
+            self.initialized_run(run_dir, marker_dir)
+
+            forced = self.run_marker("clear", "--force", "--marker-dir", marker_dir)
+
+            self.assertNotEqual(0, forced.returncode)
+            self.assertIn("unrecognized arguments", forced.stderr)
+            self.assertTrue((Path(marker_dir) / forge_marker.MARKER_FILENAME).is_file())
+
+    def test_init_refuses_to_displace_another_active_run(self) -> None:
+        with tempfile.TemporaryDirectory() as marker_dir, \
+                tempfile.TemporaryDirectory() as first_run, \
+                tempfile.TemporaryDirectory() as second_run:
+            self.initialized_run(first_run, marker_dir)
+            marker_path = Path(marker_dir) / forge_marker.MARKER_FILENAME
+            first = forge_marker.read_marker(marker_path)
+
+            second_state = Path(second_run) / "extraction-state.json"
+            second_state.write_text(
+                json.dumps(discovered_state(second_run)),
+                encoding="utf-8",
+            )
+            clash = self.run_marker(
+                "init",
+                "--state",
+                str(second_state),
+                "--marker-dir",
+                marker_dir,
+            )
+
+            self.assertNotEqual(0, clash.returncode)
+            self.assertIn("already belongs to active run", clash.stderr)
+            self.assertEqual(first, forge_marker.read_marker(marker_path))
+
+    def test_reinitializing_the_same_run_is_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir, tempfile.TemporaryDirectory() as marker_dir:
+            state_path = self.initialized_run(run_dir, marker_dir)
+
+            again = self.run_marker(
+                "init",
+                "--state",
+                str(state_path),
+                "--marker-dir",
+                marker_dir,
+            )
+
+            self.assertEqual(0, again.returncode, again.stderr)
+
+    def test_refresh_rejects_an_untrusted_marker_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir, tempfile.TemporaryDirectory() as marker_dir:
+            self.initialized_run(run_dir, marker_dir)
+            Path(marker_dir).chmod(0o777)
+
+            refused = self.run_marker("refresh", "--marker-dir", marker_dir)
+
+            self.assertNotEqual(0, refused.returncode)
+            self.assertIn("group or world writable", refused.stderr)
+
     def test_purge_cannot_remove_the_launcher_before_terminal_assertion(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir, tempfile.TemporaryDirectory() as marker_dir:
             self.initialized_run(run_dir, marker_dir)
@@ -813,26 +1029,17 @@ class CompletionGuardCommandTests(unittest.TestCase):
 
 
 class GuardContractDocumentationTests(unittest.TestCase):
-    def schema(self, name: str) -> dict:
-        schemas = json.loads(
+    def schemas(self) -> dict:
+        return json.loads(
             (SKILL_DIR / "assets" / "schemas.json").read_text(encoding="utf-8")
         )
-        return schemas["$defs"][name]
 
-    def assert_conforms(self, document: dict, schema: dict, path: str = "") -> None:
-        for key in schema.get("required", []):
-            self.assertIn(key, document, f"{path}/{key} is required")
-        properties = schema.get("properties", {})
-        if schema.get("additionalProperties") is False:
-            self.assertEqual(
-                set(),
-                set(document) - set(properties),
-                f"{path} has undeclared properties",
-            )
-        for key, subschema in properties.items():
-            value = document.get(key)
-            if isinstance(value, dict) and subschema.get("type") == "object":
-                self.assert_conforms(value, subschema, f"{path}/{key}")
+    def schema(self, name: str) -> dict:
+        return self.schemas()["$defs"][name]
+
+    def assert_conforms(self, document, schema: dict, name: str = "") -> None:
+        errors = schema_errors(document, schema, self.schemas())
+        self.assertEqual([], errors, f"{name or 'document'} violates its schema")
 
     def test_diagnostics_snapshot_matches_its_schema(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
@@ -867,6 +1074,60 @@ class GuardContractDocumentationTests(unittest.TestCase):
             ),
             schema,
         )
+
+    def test_validator_rejects_contract_violations(self) -> None:
+        """The schema tests must fail on bad documents, not pass vacuously."""
+        diagnostics_schema = self.schema("extractionDiagnostics")
+        verdict_schema = self.schema("completionVerdict")
+        with tempfile.TemporaryDirectory() as run_dir:
+            snapshot = controller.diagnostics(discovered_state(run_dir))
+
+        self.assertEqual([], schema_errors(snapshot, diagnostics_schema, self.schemas()))
+
+        bad_status = copy.deepcopy(snapshot)
+        bad_status["status"] = "finished"
+        self.assertNotEqual([], schema_errors(bad_status, diagnostics_schema, self.schemas()))
+
+        negative_counter = copy.deepcopy(snapshot)
+        negative_counter["counters"]["rows"] = -1
+        self.assertNotEqual(
+            [], schema_errors(negative_counter, diagnostics_schema, self.schemas())
+        )
+
+        string_counter = copy.deepcopy(snapshot)
+        string_counter["counters"]["rows"] = "12"
+        self.assertNotEqual(
+            [], schema_errors(string_counter, diagnostics_schema, self.schemas())
+        )
+
+        bad_kind = copy.deepcopy(snapshot)
+        bad_kind["kind"] = "something-else"
+        self.assertNotEqual([], schema_errors(bad_kind, diagnostics_schema, self.schemas()))
+
+        bad_ids = copy.deepcopy(snapshot)
+        bad_ids["actions"]["pendingActionIds"] = [1, 2]
+        self.assertNotEqual([], schema_errors(bad_ids, diagnostics_schema, self.schemas()))
+
+        self.assertNotEqual(
+            [],
+            schema_errors({"status": "incomplete"}, verdict_schema, self.schemas()),
+        )
+
+    def test_marker_schema_traverses_the_snapshot_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = discovered_state(run_dir)
+            marker = forge_marker.build_marker(
+                state=state,
+                state_path=Path(run_dir) / "extraction-state.json",
+                now=NOW,
+            )
+            marker["snapshot"] = controller.diagnostics(state)
+            marker["snapshot"]["status"] = "finished"
+
+            self.assertNotEqual(
+                [],
+                schema_errors(marker, self.schema("runMarker"), self.schemas()),
+            )
 
     def test_skill_documents_the_marker_lifecycle(self) -> None:
         contract = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")

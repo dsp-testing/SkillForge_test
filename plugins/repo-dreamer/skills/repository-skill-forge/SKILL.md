@@ -256,7 +256,8 @@ python3 "$SKILL_DIR/scripts/run-marker.py" finish
 ```
 
 Remove the marker with `run-marker.py clear` only when `$RUN_DIR` is discarded.
-It refuses to clear a marker that has not reached the terminal phase.
+It refuses to clear a marker that has not reached the terminal phase, and has no
+override flag.
 
 If this command fails because status is `running`, a final response and cleanup
 are forbidden. Read the pending action IDs from its error, invoke `next`, execute
