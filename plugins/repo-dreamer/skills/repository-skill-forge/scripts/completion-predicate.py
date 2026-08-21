@@ -133,32 +133,66 @@ def skill_dir_for(marker: dict[str, Any] | None) -> str:
     return str(SKILL_DIR)
 
 
+def recorded_checkpoint(marker: dict[str, Any]) -> dict[str, Any] | None:
+    """Read the run-local checkpoint summary the marker points at, if any.
+
+    The worker writes this file on every `advance`, so the live verdict carries
+    the same checkpoint diagnostics the marker embeds. It is purely
+    observational: any missing, unreadable, or malformed summary degrades to
+    `None` rather than changing a verdict or raising.
+    """
+    recorded = marker.get("checkpointPath")
+    if not isinstance(recorded, str) or not recorded:
+        return None
+    try:
+        checkpoint = read_json(Path(recorded))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return checkpoint if isinstance(checkpoint, dict) else None
+
+
+def worker_path(marker: dict[str, Any] | None) -> str:
+    return f"{skill_dir_for(marker)}/scripts/extraction-worker.py"
+
+
+def run_dir_for(marker: dict[str, Any] | None) -> str:
+    if marker:
+        recorded = marker.get("runDir")
+        if isinstance(recorded, str) and recorded:
+            return recorded
+    return "$RUN_DIR"
+
+
+def assert_terminal_command(marker: dict[str, Any] | None) -> str:
+    return (
+        f"python3 {worker_path(marker)} status --run-dir {run_dir_for(marker)} "
+        "--assert-terminal"
+    )
+
+
 def running_prompt(marker: dict[str, Any], pending: str) -> str:
     skill = skill_dir_for(marker)
     state_path = marker["statePath"]
-    run_dir = marker.get("runDir") or "$RUN_DIR"
+    run_dir = run_dir_for(marker)
     return (
         "Do not finish. Repository Skill Forge extraction state "
         f"{state_path} is still `running`, so a final response and run-directory "
         f"cleanup are forbidden. Pending action IDs: {pending}. Continue the "
-        f"controller loop: run `python3 {skill}/scripts/extraction-controller.py next "
-        f"--state {state_path} --parallel --out {run_dir}/actions.json`, execute every "
-        "returned action, record every outcome with record-success, record-failure, or "
-        "record-artifact-failure, run checkpoint-completed-batches.py, then run "
-        f"`python3 {skill}/scripts/run-marker.py refresh`. Repeat until "
-        f"`python3 {skill}/scripts/extraction-controller.py assert-terminal "
-        f"--state {state_path}` succeeds."
+        f"worker loop: execute the outstanding wave's `session_store_sql` calls, "
+        f"run `python3 {worker_path(marker)} advance --run-dir {run_dir}`, then "
+        f"`python3 {skill}/scripts/run-marker.py refresh`. Never call "
+        "`session_store_sql` outside a wave and never edit worker or controller "
+        f"SQL. Repeat until `{assert_terminal_command(marker)}` succeeds."
     )
 
 
 def blocked_prompt(marker: dict[str, Any]) -> str:
     skill = skill_dir_for(marker)
-    state_path = marker["statePath"]
     return (
         "Do not report success and do not resume extraction. Repository Skill Forge "
-        f"extraction state {state_path} is terminal `blocked`. Run "
-        f"`python3 {skill}/scripts/extraction-controller.py assert-terminal "
-        f"--state {state_path}`, then `python3 {skill}/scripts/run-marker.py finish`, "
+        f"extraction state {marker['statePath']} is terminal `blocked`. Run "
+        f"`{assert_terminal_command(marker)}`, then "
+        f"`python3 {skill}/scripts/run-marker.py finish`, "
         "and produce the final BLOCKED report quoting the blocker above verbatim."
     )
 
@@ -167,9 +201,8 @@ def repair_prompt(marker: dict[str, Any] | None, detail: str) -> str:
     skill = skill_dir_for(marker)
     return (
         f"Do not finish. {detail} Re-read the run directory, confirm the controller "
-        f"state file exists, run `python3 {skill}/scripts/extraction-controller.py "
-        "assert-terminal --state $RUN_DIR/extraction-state.json`, and refresh the run "
-        f"marker with `python3 {skill}/scripts/run-marker.py refresh`. If the run "
+        f"state file exists, run `{assert_terminal_command(marker)}`, and refresh the "
+        f"run marker with `python3 {skill}/scripts/run-marker.py refresh`. If the run "
         "genuinely finished, run `run-marker.py finish` and then `run-marker.py clear`."
     )
 
@@ -191,9 +224,12 @@ def missing_marker_verdict(marker_path: Path, require_marker: bool) -> dict[str,
         ),
         (
             "Do not finish. Repository Skill Forge never initialised its run marker, so "
-            "extraction completion cannot be verified. Initialise the controller, then "
-            f"run `python3 {SKILL_DIR}/scripts/run-marker.py init --state "
-            "$RUN_DIR/extraction-state.json` and continue the documented controller loop."
+            "extraction completion cannot be verified. Start the worker with "
+            f"`python3 {SKILL_DIR}/scripts/extraction-worker.py start --run-dir "
+            f"$RUN_DIR ...`, then run `python3 {SKILL_DIR}/scripts/run-marker.py init "
+            "--state $RUN_DIR/extraction-state.json --checkpoint "
+            "$RUN_DIR/checkpoint-summary.json --ledger $RUN_DIR/primitives.sanitized.json` "
+            "and continue the documented worker loop."
         ),
     )
 
@@ -378,7 +414,10 @@ def evaluate(
         )
 
     try:
-        snapshot = controller.diagnostics(copy.deepcopy(state))
+        snapshot = controller.diagnostics(
+            copy.deepcopy(state),
+            checkpoint=recorded_checkpoint(marker),
+        )
     except (KeyError, TypeError, ValueError) as error:
         return verdict(
             INCOMPLETE,

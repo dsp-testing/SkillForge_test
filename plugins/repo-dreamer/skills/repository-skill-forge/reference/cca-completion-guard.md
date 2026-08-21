@@ -117,10 +117,17 @@ The predicate is deterministic and side-effect free. All writes happen in
 
 | Point in the run | Command |
 | --- | --- |
-| After `extraction-controller.py init` | `run-marker.py init --state $RUN_DIR/extraction-state.json --checkpoint $RUN_DIR/checkpoint-summary.json` |
-| After each recorded action batch and checkpoint | `run-marker.py refresh` |
-| After `assert-terminal` succeeds | `run-marker.py finish` |
+| After `extraction-worker.py start` | `run-marker.py init --state $RUN_DIR/extraction-state.json --checkpoint $RUN_DIR/checkpoint-summary.json --ledger $RUN_DIR/primitives.sanitized.json` |
+| After each `extraction-worker.py advance` | `run-marker.py refresh` |
+| After `extraction-worker.py status --assert-terminal` succeeds | `run-marker.py finish` |
 | Before discarding `$RUN_DIR` | `run-marker.py clear` |
+
+The worker checkpoints in process and writes its summary to
+`$RUN_DIR/checkpoint-summary.json`, so `refresh` reports current checkpoint
+coverage in the snapshot's `checkpoint` field. Because the worker owns the
+extraction loop, every `incomplete` `continuePrompt` steers the agent back into
+`extraction-worker.py advance` rather than into raw controller commands: calling
+`session_store_sql` outside a worker wave is forbidden.
 
 `clear` refuses to run while the marker phase is still `active`, so the marker
 cannot be removed before terminal assertion. There is deliberately no override
@@ -158,7 +165,8 @@ controller state; it is not a second state machine.
 - `batches`: total, complete, omitted, pending, and a per-status breakdown
 - `partitions`: total, discovery complete, pending discovery, omitted
 - `coverage`: session coverage and its known or unknown status, fallback count
-- `checkpoint`: the latest `checkpoint-completed-batches.py` summary
+- `checkpoint`: the latest checkpoint summary, written by the worker to
+  `$RUN_DIR/checkpoint-summary.json` on every `advance`
 - `blocker` and `blockerCount`
 
 ## Testing this plugin branch from a cloud agent run
@@ -184,7 +192,10 @@ Two facts are documented and verified:
   entries override user entries for the same key.
 
 To point a cloud agent run at an unmerged branch, push the branch to
-`dsp-testing/SkillForge_test` and add a ref to the marketplace source:
+`dsp-testing/SkillForge_test` and add a ref to the marketplace source. Use
+`morabbin-forge-seven-day-integration`, the temporary branch that merges the
+completion guard, the deterministic worker, and the `_query_source` fix, so one
+run exercises all three together:
 
 ```json
 {
@@ -193,7 +204,7 @@ To point a cloud agent run at an unmerged branch, push the branch to
       "source": {
         "source": "github",
         "repo": "dsp-testing/SkillForge_test",
-        "ref": "morabbin-forge-completion-guard"
+        "ref": "morabbin-forge-seven-day-integration"
       }
     }
   },
@@ -212,7 +223,7 @@ example by checking that `reference/cca-completion-guard.md` and
 If the ref is ignored, fall back in this order:
 
 1. String source form with a ref suffix:
-   `"source": "dsp-testing/SkillForge_test#morabbin-forge-completion-guard"`.
+   `"source": "dsp-testing/SkillForge_test#morabbin-forge-seven-day-integration"`.
 2. A disposable branch in `dsp-testing/SkillForge_test` carrying these commits,
    referenced the same way, so the test branch is obvious and easy to delete.
 3. A temporary fork with the branch merged to its default branch, referenced

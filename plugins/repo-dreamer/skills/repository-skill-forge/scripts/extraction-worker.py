@@ -52,6 +52,7 @@ class WorkerLayout:
         self.worker_dir = self.run_dir / "worker"
         self.state = self.run_dir / "extraction-state.json"
         self.ledger = self.run_dir / "primitives.sanitized.json"
+        self.checkpoint_summary = self.run_dir / "checkpoint-summary.json"
         self.worker_state = self.worker_dir / "worker-state.json"
         self.wave = self.worker_dir / "wave.json"
         self.envelope = self.worker_dir / "envelope.json"
@@ -400,19 +401,43 @@ def run_checkpoint(
         )
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
         controller.record_checkpoint_failure(state, str(error))
-        return {
-            "checkpointedBatchCount": 0,
-            "processedBatchCount": 0,
-            "terminalCoverageAttached": False,
-            "failed": True,
-            "reason": str(error)[:400],
-        }
-    return {
-        "checkpointedBatchCount": len(summary["checkpointedBatchIds"]),
-        "processedBatchCount": len(summary["processedBatchIds"]),
-        "terminalCoverageAttached": bool(summary["terminalCoverageAttached"]),
-        "failed": False,
-    }
+        return publish_checkpoint(
+            layout,
+            {
+                "checkpointedBatchCount": 0,
+                "processedBatchCount": 0,
+                "terminalCoverageAttached": False,
+                "failed": True,
+                "reason": str(error)[:400],
+            },
+        )
+    return publish_checkpoint(
+        layout,
+        {
+            "checkpointedBatchCount": len(summary["checkpointedBatchIds"]),
+            "processedBatchCount": len(summary["processedBatchIds"]),
+            "terminalCoverageAttached": bool(summary["terminalCoverageAttached"]),
+            "failed": False,
+        },
+    )
+
+
+def publish_checkpoint(
+    layout: WorkerLayout,
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist the checkpoint summary the completion marker reports as diagnostics.
+
+    The worker checkpoints in process, so nothing else writes the summary file
+    that `run-marker.py` embeds in its snapshot. Writing it here keeps guard
+    diagnostics derived from run-local state instead of model recollection.
+    """
+    try:
+        write_json(layout.checkpoint_summary, summary)
+    except OSError:
+        # Guard diagnostics are observational: never fail extraction over them.
+        pass
+    return summary
 
 
 def outcome_counts(outcomes: list[dict[str, Any]]) -> dict[str, int]:
@@ -785,7 +810,11 @@ def main() -> None:
         raise SystemExit(str(error)) from error
     emit(envelope, layout, args.out)
     if args.command == "status" and args.assert_terminal and not envelope["terminal"]:
-        raise SystemExit(envelope["assertion"]["reason"])
+        raise SystemExit(
+            f"{envelope['assertion']['reason']}; execute the outstanding wave, then "
+            f"run `extraction-worker.py advance --run-dir {layout.run_dir}` until this "
+            "assertion succeeds"
+        )
 
 
 if __name__ == "__main__":
