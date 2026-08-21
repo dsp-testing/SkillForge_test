@@ -98,11 +98,25 @@ def load_action(path: str, action_id: str) -> dict[str, Any]:
     return payload
 
 
-def result_content(
+def failure_message(result: dict[str, Any]) -> str:
+    for candidate in (result.get("content"), result.get("error")):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return "session_store_sql call was not explicitly successful"
+
+
+def matching_completions(
     events_root: Path,
     sql: str,
-    action_id: str | None = None,
-) -> str:
+    action_id: str | None,
+    exclude_call_ids: frozenset[str],
+) -> tuple[bool, list[list[tuple[int, int, str | None, bool | None, dict[str, Any]]]]]:
+    """Group this action's completed calls by match precision.
+
+    Group 0 matches an exact tool-call ID, group 1 an exact rendered SQL body,
+    and group 2 a normalized rendered SQL body. The first element is ``True``
+    when the newest start carrying this action ID submitted different SQL.
+    """
     event_files = sorted(
         events_root.glob("*/events.jsonl"),
         key=lambda path: path.stat().st_mtime,
@@ -121,6 +135,8 @@ def result_content(
                 continue
             arguments = data.get("arguments")
             call_id = data.get("toolCallId")
+            if isinstance(call_id, str) and call_id in exclude_call_ids:
+                continue
             if (
                 action_id is not None
                 and data.get("toolName") == "session_store_sql"
@@ -150,14 +166,12 @@ def result_content(
             key=lambda start: (-start[0], start[1]),
         )
         if normalize_sql(submitted_sql) != normalized_sql:
-            raise QueryHandoffMismatch(
-                f"session_store_sql query handoff mismatch for action {action_id}"
-            )
+            return True, [[], [], []]
         exact_call_ids.add(described_call_id)
 
     matching_call_ids = exact_call_ids or normalized_call_ids
     match_groups: list[
-        list[tuple[int, int, bool | None, dict[str, Any]]]
+        list[tuple[int, int, str | None, bool | None, dict[str, Any]]]
     ] = [[], [], []]
     for file_index, event_file in enumerate(event_files):
         for event_index, event in enumerate(read_events(event_file)):
@@ -170,9 +184,12 @@ def result_content(
             if not isinstance(result, dict):
                 continue
             call_id = data.get("toolCallId")
-            if isinstance(call_id, str) and call_id in matching_call_ids:
+            if isinstance(call_id, str) and call_id in exclude_call_ids:
+                continue
+            identity = call_id if isinstance(call_id, str) else None
+            if identity is not None and identity in matching_call_ids:
                 match_groups[0].append(
-                    (file_index, event_index, data.get("success"), result)
+                    (file_index, event_index, identity, data.get("success"), result)
                 )
                 continue
             detailed = result.get("detailedContent")
@@ -189,42 +206,220 @@ def result_content(
             )
             if rendered_sql == sql:
                 match_groups[1].append(
-                    (file_index, event_index, data.get("success"), result)
+                    (file_index, event_index, identity, data.get("success"), result)
                 )
             elif (
                 isinstance(rendered_sql, str)
                 and normalize_sql(rendered_sql) == normalized_sql
             ):
                 match_groups[2].append(
-                    (file_index, event_index, data.get("success"), result)
+                    (file_index, event_index, identity, data.get("success"), result)
                 )
+    return False, match_groups
 
+
+def observed_call_ids_batch(
+    events_root: Path,
+    targets: list[tuple[str, str]],
+) -> dict[str, list[str]]:
+    """Completed tool-call IDs per action, resolved in one scan of the logs.
+
+    ``targets`` pairs an action ID with its SQL. Resolving a whole wave in a
+    single scan keeps the wave boundary from multiplying the worker's dominant
+    I/O cost by the wave width.
+    """
+    if not targets:
+        return {}
+    event_files = sorted(
+        events_root.glob("*/events.jsonl"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    wanted = {action_id: normalize_sql(sql) for action_id, sql in targets}
+    exact: dict[str, set[str]] = {action_id: set() for action_id, _ in targets}
+    loose: dict[str, set[str]] = {action_id: set() for action_id, _ in targets}
+    described: dict[str, tuple[int, int, str]] = {}
+    for file_index, event_file in enumerate(event_files):
+        for event_index, event in enumerate(read_events(event_file)):
+            if event.get("type") != "tool.execution_start":
+                continue
+            data = event.get("data")
+            if not isinstance(data, dict) or data.get("toolName") != "session_store_sql":
+                continue
+            arguments = data.get("arguments")
+            call_id = data.get("toolCallId")
+            if not isinstance(arguments, dict) or not isinstance(call_id, str):
+                continue
+            query = arguments.get("query")
+            if not isinstance(query, str):
+                continue
+            query_tokens = normalize_sql(query)
+            for action_id, sql in targets:
+                if query == sql:
+                    exact[action_id].add(call_id)
+                elif query_tokens == wanted[action_id]:
+                    loose[action_id].add(call_id)
+            description = arguments.get("description")
+            if isinstance(description, str) and description in wanted:
+                previous = described.get(description)
+                position = (-file_index, event_index)
+                if previous is None or (-previous[0], previous[1]) < position:
+                    described[description] = (file_index, event_index, call_id)
+    for action_id, call in described.items():
+        exact[action_id].add(call[2])
+    matching = {
+        action_id: (exact[action_id] or loose[action_id]) for action_id, _ in targets
+    }
+
+    observed: dict[str, set[str]] = {action_id: set() for action_id, _ in targets}
+    for event_file in event_files:
+        for event in read_events(event_file):
+            if event.get("type") != "tool.execution_complete":
+                continue
+            data = event.get("data")
+            if not isinstance(data, dict):
+                continue
+            result = data.get("result")
+            call_id = data.get("toolCallId")
+            if not isinstance(result, dict) or not isinstance(call_id, str):
+                continue
+            detailed = result.get("detailedContent")
+            sql_match = (
+                DETAILED_SQL_RE.fullmatch(detailed)
+                if isinstance(detailed, str)
+                else None
+            )
+            rendered_sql = (
+                sql_match.group(1).split("\n\n", 1)[0] if sql_match else None
+            )
+            rendered_tokens = (
+                normalize_sql(rendered_sql) if isinstance(rendered_sql, str) else None
+            )
+            for action_id, sql in targets:
+                if call_id in matching[action_id] or rendered_sql == sql or (
+                    rendered_tokens is not None
+                    and rendered_tokens == wanted[action_id]
+                ):
+                    observed[action_id].add(call_id)
+    return {action_id: sorted(observed[action_id]) for action_id, _ in targets}
+
+
+def observed_call_ids(
+    events_root: Path,
+    sql: str,
+    action_id: str | None = None,
+) -> list[str]:
+    """Tool-call IDs already completed for this action, for wave boundaries."""
+    if action_id is None:
+        _, match_groups = matching_completions(events_root, sql, None, frozenset())
+        return sorted(
+            {
+                call_id
+                for matches in match_groups
+                for _, _, call_id, _, _ in matches
+                if call_id
+            }
+        )
+    return observed_call_ids_batch(events_root, [(action_id, sql)])[action_id]
+
+
+def probe_result(
+    events_root: Path,
+    sql: str,
+    action_id: str | None = None,
+    exclude_call_ids: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
+    """Classify the current session's result for one action without raising.
+
+    States are ``ready`` with materializable ``content``, ``failed`` with the
+    tool's own error ``message``, ``handoff-mismatch``, ``error`` for a broken
+    but present result, and ``missing`` while the tool call has not completed.
+
+    ``exclude_call_ids`` drops calls that completed before the current wave was
+    emitted, so a re-issued action never harvests its own previous attempt.
+    """
+    handoff, match_groups = matching_completions(
+        events_root,
+        sql,
+        action_id,
+        exclude_call_ids,
+    )
+    if handoff:
+        return {
+            "state": "handoff-mismatch",
+            "message": (
+                f"session_store_sql query handoff mismatch for action {action_id}"
+            ),
+        }
     selected: tuple[bool | None, dict[str, Any]] | None = None
     for matches in match_groups:
         if matches:
-            _, _, success, result = max(
+            _, _, _, success, result = max(
                 matches,
                 key=lambda match: (-match[0], match[1]),
             )
             selected = success, result
             break
-    if selected is not None:
-        success, result = selected
-        if success is not True:
-            raise ValueError(
-                "matching session_store_sql call was not explicitly successful"
-            )
-        content = result.get("content")
-        if not isinstance(content, str):
-            raise ValueError("matching session_store_sql result has no content")
-        spill_match = SPILL_PATH_RE.search(content)
-        if spill_match:
-            spill_path = Path(spill_match.group(1).strip())
-            if not spill_path.is_file():
-                raise ValueError(f"session_store_sql spill file not found: {spill_path}")
-            return spill_path.read_text(encoding="utf-8")
-        return content
-    raise ValueError("matching session_store_sql result not found in session event logs")
+    if selected is None:
+        return {
+            "state": "missing",
+            "message": (
+                "matching session_store_sql result not found in session event logs"
+            ),
+        }
+    success, result = selected
+    if success is not True:
+        return {"state": "failed", "message": failure_message(result)}
+    content = result.get("content")
+    if not isinstance(content, str):
+        return {
+            "state": "error",
+            "message": "matching session_store_sql result has no content",
+        }
+    spill_match = SPILL_PATH_RE.search(content)
+    if spill_match:
+        spill_path = Path(spill_match.group(1).strip())
+        if not spill_path.is_file():
+            return {
+                "state": "error",
+                "message": f"session_store_sql spill file not found: {spill_path}",
+            }
+        try:
+            content = spill_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            return {
+                "state": "error",
+                "message": (
+                    "session_store_sql spill file could not be read: "
+                    f"{spill_path}: {error}"
+                ),
+            }
+    return {"state": "ready", "content": content}
+
+
+def result_content(
+    events_root: Path,
+    sql: str,
+    action_id: str | None = None,
+) -> str:
+    probe = probe_result(events_root, sql, action_id)
+    if probe["state"] == "ready":
+        return str(probe["content"])
+    if probe["state"] == "handoff-mismatch":
+        raise QueryHandoffMismatch(probe["message"])
+    if probe["state"] == "failed":
+        raise ValueError(
+            "matching session_store_sql call was not explicitly successful"
+        )
+    raise ValueError(probe["message"])
+
+
+def materialize_content(kind: str, content: str, output_path: str) -> int:
+    """Parse one bounded result into the controller's JSON artifact."""
+    header, raw_rows = table_rows(content)
+    rows = parse_rows(kind, header, raw_rows)
+    write_json(output_path, rows)
+    return len(rows)
 
 
 def table_rows(content: str) -> tuple[list[str] | None, list[str]]:
@@ -375,9 +570,7 @@ def main() -> None:
         raise SystemExit("action is missing kind")
     try:
         content = result_content(Path(args.events_root), sql, args.action)
-        header, raw_rows = table_rows(content)
-        rows = parse_rows(kind, header, raw_rows)
-        write_json(output_path, rows)
+        materialize_content(kind, content, output_path)
         print(output_path)
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise SystemExit(str(error)) from error

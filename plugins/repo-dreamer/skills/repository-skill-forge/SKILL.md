@@ -87,17 +87,57 @@ selected for publication.
 
 ### 2. Run the deployed fast extraction strategy
 
-Initialize `extraction-controller.py` with the interface defaults. Immediately
-after initialization, publish the run marker so completion can be verified from
-state rather than from memory:
+`extraction-worker.py` owns the extraction loop. It generates bounded actions,
+materializes exact results, records every outcome through
+`extraction-controller.py`, checkpoints completed batches, and asserts terminal
+status. Execute only the `session_store_sql` calls it asks for.
+
+```bash
+python3 "$SKILL_DIR/scripts/extraction-worker.py" start \
+  --run-dir "$RUN_DIR" \
+  --repository "$REPOSITORY" \
+  --window-end "$WINDOW_END" \
+  --window-hours 96 \
+  --main-branch "$DEFAULT_BRANCH"
+```
+
+Immediately after `start` creates run-local state, publish the run marker so
+completion can be verified from state rather than from memory:
 
 ```bash
 python3 "$SKILL_DIR/scripts/run-marker.py" init \
   --state "$RUN_DIR/extraction-state.json" \
-  --checkpoint "$RUN_DIR/checkpoint-summary.json"
+  --checkpoint "$RUN_DIR/checkpoint-summary.json" \
+  --ledger "$RUN_DIR/primitives.sanitized.json"
 ```
 
-Its primary strategy is:
+Every command prints one `workerEnvelope` (`assets/schemas.json`). While `kind`
+is `wave`, call `session_store_sql` once per entry in `wave.actions`, passing
+that entry's `description` and `query` unchanged, executing the wave's calls
+concurrently, then run:
+
+```bash
+python3 "$SKILL_DIR/scripts/extraction-worker.py" advance --run-dir "$RUN_DIR"
+```
+
+Refresh the run marker immediately after every `advance` so its diagnostic
+snapshot always reflects the persisted controller and checkpoint state:
+
+```bash
+python3 "$SKILL_DIR/scripts/run-marker.py" refresh
+```
+
+Repeat until `kind` is `terminal`. Optionally add `--wait 120` to `advance` to
+issue it in the same turn as its wave; an unresolved action is reported
+`pending`, nothing is recorded, and the identical query is re-emitted, so a
+timeout degrades safely to the two-turn pattern.
+
+Never edit worker or controller SQL, never call `session_store_sql` outside a
+wave, and never retry or omit a query yourself. The worker records every
+outcome exactly once and the controller is the only writer of run-local
+extraction state.
+
+The primary strategy is:
 
 1. select sessions updated inside the fixed window, returning only `id` and
    `updated_at`, ordered by `(updated_at, id)` for keyset pagination, with an
@@ -122,131 +162,36 @@ Do not fetch turns, assistant messages, or unrelated tools. Do not run a
 separate repository-wide count query. Discovery is authoritative, and zero
 sessions is a successful no-evidence result.
 
-Every primary discovery query requests `discoveryPageSize + 1` rows. Accept the
-first page-size rows and continue after the last `(updated_at, id)` pair.
-Process every successful page before requesting the next page.
+Every primary discovery query requests `discoveryPageSize + 1` rows. The
+controller accepts the first page-size rows and continues after the last
+`(updated_at, id)` pair, and processes every successful page before requesting
+the next. Discovery manifests contain one action; post-discovery manifests
+contain up to `maxConcurrentBatches` actions from distinct session batches.
+Completed discovery partitions are extracted before unresolved partitions so
+slow windows do not starve analysis of evidence already found.
 
-Retry only non-timeout transient network, rate-limit, or server failures, at
-most once. Never repeat an identical timed-out query. Primary discovery
+Only non-timeout transient network, rate-limit, or server failures are retried,
+at most once. An identical timed-out query is never repeated. Primary discovery
 timeout before the first successful page uses adaptive time splitting down to
 `minWindowMinutes`. A timeout after successful pages discloses the uncollected
 remainder without discarding accepted sessions.
 
-Every query result must be recorded through `extraction-controller.py`. Never
-retry manually, alter controller SQL, or continue after a blocked state. Pass
-the action's `description` unchanged to `session_store_sql`; it equals the
-stable `actionId`.
+The worker checkpoints after recording each wave. Checkpointing is idempotent by
+batch ID, atomically promotes the sanitized run ledger before deleting resolved
+raw artifacts, and attaches final extraction coverage once the controller is
+terminal. A checkpoint failure becomes a terminal controller blocker so it can
+never be mistaken for unfinished `running` extraction.
 
-When query rows are returned to the agent rather than written to `outputPath`,
-use the packaged materializer. It matches the controller SQL in the current
-automation session's local `events.jsonl`, follows runtime spill receipts, and
-atomically writes JSON. This local log is transport for the current result,
-not a repository-wide SQL query against `events`.
-
-```bash
-RESULT_PATH="$(
-  python3 "$SKILL_DIR/scripts/materialize-session-query.py" \
-    --actions "$RUN_DIR/actions.json" \
-    --action "$ACTION_ID"
-)"
-
-python3 "$SKILL_DIR/scripts/extraction-controller.py" record-success \
-  --state "$RUN_DIR/extraction-state.json" \
-  --action "$ACTION_ID" \
-  --result "$RESULT_PATH" \
-  --out "$RUN_DIR/extraction-state.next.json"
-mv "$RUN_DIR/extraction-state.next.json" "$RUN_DIR/extraction-state.json"
-```
-
-Do not manually transcribe returned rows. If materialization reports
-`query handoff mismatch`, record a handoff failure so the controller replaces
-the exact-ID batch with smaller queries:
-
-```bash
-python3 "$SKILL_DIR/scripts/extraction-controller.py" record-failure \
-  --state "$RUN_DIR/extraction-state.json" \
-  --action "$ACTION_ID" \
-  --reason "session_store_sql query handoff mismatch" \
-  --error-kind handoff \
-  --out "$RUN_DIR/extraction-state.next.json"
-mv "$RUN_DIR/extraction-state.next.json" "$RUN_DIR/extraction-state.json"
-```
-
-For any other materialization failure, retry the materializer once after
-confirming the tool call completed. Then record the integration blocker:
-
-```bash
-python3 "$SKILL_DIR/scripts/extraction-controller.py" record-artifact-failure \
-  --state "$RUN_DIR/extraction-state.json" \
-  --action "$ACTION_ID" \
-  --reason "session query rows could not be materialized as JSON" \
-  --out "$RUN_DIR/extraction-state.next.json"
-mv "$RUN_DIR/extraction-state.next.json" "$RUN_DIR/extraction-state.json"
-```
-
-Artifact failures never split, omit, or activate fallback. Extract completed
-discovery partitions before requesting unresolved partitions so slow windows
-do not starve analysis of evidence already found.
-
-Generate bounded action batches with:
-
-```bash
-python3 "$SKILL_DIR/scripts/extraction-controller.py" next \
-  --state "$RUN_DIR/extraction-state.json" \
-  --parallel \
-  --out "$RUN_DIR/actions.json"
-```
-
-Discovery manifests contain one action. Post-discovery manifests contain up to
-`maxConcurrentBatches` actions from distinct session batches. Execute those
-queries concurrently and record results sequentially by exact action ID, never
-by completion order. Record completed successes before terminal failures. The
-controller is the only writer of run-local extraction state.
-
-After recording every action batch, immediately normalize, derive, sanitize,
-and merge every newly completed extraction batch:
-
-```bash
-python3 "$SKILL_DIR/scripts/checkpoint-completed-batches.py" \
-  --state "$RUN_DIR/extraction-state.json" \
-  --ledger "$RUN_DIR/primitives.sanitized.json" \
-  --main-branch "$DEFAULT_BRANCH" \
-  --out "$RUN_DIR/checkpoint-summary.json"
-```
-
-The checkpoint helper is idempotent by batch ID. It atomically promotes the
-sanitized run ledger before deleting resolved raw query, normalized, and
-unsanitized artifacts. Invoke it again after `next` first returns a terminal
-controller status so final extraction coverage is attached to the ledger.
-
-Refresh the run marker immediately after every checkpoint so its diagnostic
-snapshot always reflects the persisted controller state:
-
-```bash
-python3 "$SKILL_DIR/scripts/run-marker.py" refresh
-```
-
-If checkpointing fails, record that failure through the controller before
-stopping:
-
-```bash
-python3 "$SKILL_DIR/scripts/extraction-controller.py" record-checkpoint-failure \
-  --state "$RUN_DIR/extraction-state.json" \
-  --reason "completed batch could not be normalized and sanitized" \
-  --out "$RUN_DIR/extraction-state.next.json"
-mv "$RUN_DIR/extraction-state.next.json" "$RUN_DIR/extraction-state.json"
-```
-
-Do not continue extraction after a checkpoint failure. The controller must
-reach terminal `blocked` status so the failure cannot be mistaken for an
-unfinished `running` extraction.
+Each checkpoint is also written to `$RUN_DIR/checkpoint-summary.json`, so the
+run marker's diagnostic snapshot reports current checkpoint coverage rather than
+model recollection.
 
 Immediately before any final response, publication decision, or run-directory
 cleanup, require:
 
 ```bash
-python3 "$SKILL_DIR/scripts/extraction-controller.py" assert-terminal \
-  --state "$RUN_DIR/extraction-state.json"
+python3 "$SKILL_DIR/scripts/extraction-worker.py" status \
+  --run-dir "$RUN_DIR" --assert-terminal
 ```
 
 Only once that command succeeds, record the terminal summary in the marker:
@@ -259,18 +204,22 @@ Remove the marker with `run-marker.py clear` only when `$RUN_DIR` is discarded.
 It refuses to clear a marker that has not reached the terminal phase, and has no
 override flag.
 
-If this command fails because status is `running`, a final response and cleanup
-are forbidden. Read the pending action IDs from its error, invoke `next`, execute
-the actions, and record every outcome. Repeat until `assert-terminal` succeeds.
+If this fails because status is `running`, a final response and cleanup are
+forbidden. Read `pendingActionIds` from its envelope, execute the outstanding
+wave, and keep advancing until it succeeds.
 
-A run is `BLOCKED` only when `assert-terminal` succeeds and reports controller
+A run is `BLOCKED` only when that assertion succeeds and reports controller
 status `blocked`. Never translate `running`, pending work, elapsed time, action
 volume, or an unrelated helper-shell/display error into `BLOCKED`. Fix or omit
-nonessential display commands and continue from the persisted controller state.
+nonessential display commands and continue from the persisted run-local state.
 Do not delete `$RUN_DIR` while status is `running`.
 
-Once the controller is initialized, do not stop for label, target-identity, or
+Once the worker is started, do not stop for label, target-identity, or
 publication-tool checks while its status remains `running`.
+
+`reference/extraction-worker.md` documents the envelope contract, the exact
+outcome mapping, the measured cycle reduction, the remaining runtime boundary,
+and the bounded per-action fallback commands for when the worker cannot run.
 
 ### 3. Handle irreducible query failures
 
@@ -290,10 +239,10 @@ explicit throughout proposal validation and publication.
 
 ### 4. Aggregate the progressively sanitized run
 
-After terminal assertion, require `$RUN_DIR/primitives.sanitized.json`. It
-already contains every completed batch and the controller's complete or
-disclosed-partial coverage. Do not repeat normalization or sanitization at the
-end of extraction.
+After terminal assertion, require `$RUN_DIR/primitives.sanitized.json`. The
+worker has already promoted every completed batch and attached the controller's
+complete or disclosed-partial coverage. Do not repeat normalization or
+sanitization at the end of extraction.
 
 Raw commands and source content remain ephemeral. `aggregate-primitives.py`
 deduplicates only the current run and emits patterns and candidates; it does
@@ -458,9 +407,9 @@ Discard run evidence when the automation finishes.
 Success requires complete or disclosed-partial extraction, sanitized
 current-window evidence, complete open-and-closed PR reconciliation, no more
 than one PR create/update, and a persistent valid marker in every published
-Forge PR. The final report must derive its extraction status from the successful
-`assert-terminal` result. It must never report `BLOCKED` when that command
-fails because status is `running`.
+Forge PR. The final report must derive its extraction status from a successful
+`extraction-worker.py status --assert-terminal` result. It must never report
+`BLOCKED` when that command fails because status is `running`.
 
 An opt-in coding agent completion guard may run `completion-predicate.py` when
 the agent tries to stop. It enforces the same invariant rather than replacing
@@ -478,6 +427,8 @@ tool-call, output, context, or automation limit.
 
 ## Assets
 
+- `scripts/extraction-worker.py`: deterministic extraction driver, bounded
+  worker protocol, and terminal assertion.
 - `scripts/extraction-controller.py`: resumable run-local extraction state,
   fast primary queries, explicit partial omissions, and the machine-readable
   `diagnostics` snapshot.
@@ -498,10 +449,13 @@ tool-call, output, context, or automation limit.
   selected-path, content-equality, and leakage validation.
 - `scripts/session_queries.py`: materialized session queries and opt-in
   tool-event fallback SQL.
+- `reference/extraction-worker.md`: worker protocol, runtime boundary, measured
+  cycle reduction, and the bounded per-action fallback.
 - `prompts/author-pr-body.md`: plain-language PR body contract.
 - `prompts/review-pr-body.md`: final PR body evidence and safety review.
 - `reference/cca-completion-guard.md`: coding agent completion guard command,
   environment, verdict, and configuration contract.
-- `assets/schemas.json`: extraction, candidate, and PR metadata contracts.
+- `assets/schemas.json`: extraction, worker protocol, candidate, and PR
+  metadata contracts.
 
 **Abstraction level:** strategic
