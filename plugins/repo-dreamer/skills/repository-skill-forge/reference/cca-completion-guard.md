@@ -55,11 +55,24 @@ run. It turns a missing marker into an `incomplete` verdict instead of a pass.
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `FORGE_RUN_MARKER` | Absolute path to the marker file. The generated launcher exports it. | `$FORGE_MARKER_DIR/run-marker.json` |
+| `FORGE_RUN_MARKER` | Absolute path to the marker file, for a direct predicate or `run-marker.py` invocation. | `$FORGE_MARKER_DIR/run-marker.json` |
 | `FORGE_MARKER_DIR` | Directory holding the marker and launcher. | `/tmp/copilot-skill-forge` |
 
 Command-line flags win over both: `--marker` overrides `FORGE_RUN_MARKER`, and
 `--marker-dir` overrides `FORGE_MARKER_DIR`.
+
+Every marker location must be an **absolute** path. A relative value is refused
+with a clear error rather than resolved, because it would otherwise anchor to
+the working directory, and the run and the agent stop hook do not share one.
+Silently resolving it would point the guard at a path that does not exist, which
+the permissive wrapper would report as `complete`.
+
+The generated launcher **pins** the marker path of the run that created it and
+does not honour an inherited `FORGE_RUN_MARKER`. A stale value left over from an
+earlier run, a container image default, or a co-scheduled job would otherwise
+retarget the guard at another run's state. Use the environment variables or the
+flags to point a *direct* invocation somewhere else; the launcher always speaks
+for its own run.
 
 The marker directory is created mode `0700` and is re-checked on every use. A
 directory that is a symlink, is owned by another user, or is group or world
@@ -86,6 +99,7 @@ installed plugin directory.
 | `state-unreadable` | incomplete | The state file is not a readable JSON object |
 | `marker-stale` | incomplete | The state is gone and the marker was not refreshed within `--max-age-seconds` |
 | `marker-unreadable` | incomplete | The marker is malformed or has an unsupported schema |
+| `marker-unresolvable` | incomplete | The configured marker location is not a usable absolute path |
 | `marker-untrusted` | incomplete | The marker directory is a symlink, is not owned by this user, or is group or world writable |
 | `marker-missing` | incomplete | No marker, and `--require-marker` was set |
 | `predicate-error` | incomplete | The predicate itself failed before it could judge the run |
@@ -125,9 +139,10 @@ give each its own location with `--marker-dir` or `FORGE_MARKER_DIR`.
 `refresh` and `finish` locate the controller state through the marker, not
 through model memory, and rewrite the marker atomically with an incremented
 `revision`. Both validate the marker directory before reading anything inside
-it. Marker paths from flags or the environment are normalized to absolute paths
-without resolving symlinks, so the launcher resolves the same marker regardless
-of the working directory it is invoked from.
+it. Marker locations must be absolute and are normalized without resolving
+symlinks, so the guard reaches the same marker whatever working directory it is
+invoked from, while the symlink rejection above still applies to the final path
+component.
 
 ## Snapshot fields
 

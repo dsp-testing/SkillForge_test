@@ -452,14 +452,28 @@ def main() -> None:
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
-    marker_path = forge_marker.resolve_marker_path(args.marker, args.marker_dir)
+    marker_path: Path | None = None
     try:
+        marker_path = forge_marker.resolve_marker_path(args.marker, args.marker_dir)
         result = evaluate(
             controller=load_controller(),
             marker_path=marker_path,
             max_age_seconds=args.max_age_seconds,
             require_marker=args.require_marker,
             max_pending_ids=args.max_pending_ids,
+        )
+    except forge_marker.MarkerError as error:
+        result = verdict(
+            INCOMPLETE,
+            "marker-unresolvable",
+            (
+                "repository Skill Forge run marker location could not be resolved: "
+                f"{error}"
+            ),
+            repair_prompt(
+                None,
+                "The Skill Forge marker location is not a usable absolute path.",
+            ),
         )
     except Exception as error:  # noqa: BLE001 - the guard must always emit a verdict
         result = verdict(
@@ -477,7 +491,10 @@ def main() -> None:
 
     if not args.quiet:
         print(
-            json.dumps({"markerPath": str(marker_path), **result}, sort_keys=False),
+            json.dumps(
+                {"markerPath": str(marker_path) if marker_path else None, **result},
+                sort_keys=False,
+            ),
             file=sys.stderr,
         )
     print(json.dumps(contract_line(result, args.max_reason_chars, args.max_prompt_chars)))

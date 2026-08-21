@@ -172,12 +172,14 @@ def command_clear(args: argparse.Namespace) -> dict[str, Any]:
         cleared = True
     else:
         cleared = False
-    if args.purge:
-        launcher_path.unlink(missing_ok=True)
+    launcher_removed = False
+    if args.purge and launcher_path.exists():
+        launcher_path.unlink()
+        launcher_removed = True
     return {
         "markerPath": str(marker_path),
         "cleared": cleared,
-        "launcherRemoved": args.purge,
+        "launcherRemoved": launcher_removed,
     }
 
 

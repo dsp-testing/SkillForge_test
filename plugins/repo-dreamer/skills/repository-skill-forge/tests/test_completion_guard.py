@@ -299,17 +299,6 @@ class RunMarkerTests(unittest.TestCase):
             forge_marker.resolve_marker_path(None, None, {}),
         )
 
-    def test_launcher_quotes_paths_and_defaults_the_marker(self) -> None:
-        launcher = forge_marker.render_launcher(
-            marker_path="/tmp/space dir/run-marker.json",
-            predicate_path="/tmp/skill/completion-predicate.py",
-            python_executable="/usr/bin/python3",
-        )
-
-        self.assertIn("FORGE_RUN_MARKER=${FORGE_RUN_MARKER:-'/tmp/space dir/run-marker.json'}", launcher)
-        self.assertIn("PYTHONDONTWRITEBYTECODE=1", launcher)
-        self.assertIn("exec /usr/bin/python3 /tmp/skill/completion-predicate.py \"$@\"", launcher)
-
     def test_group_writable_marker_directory_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as marker_dir:
             Path(marker_dir).chmod(0o770)
@@ -361,21 +350,55 @@ class RunMarkerTests(unittest.TestCase):
             with self.assertRaises(forge_marker.MarkerError):
                 forge_marker.ensure_private_directory(link)
 
-    def test_resolved_marker_paths_are_always_absolute(self) -> None:
-        relative_dir = forge_marker.resolve_marker_path(None, "relative-dir", {})
-        relative_marker = forge_marker.resolve_marker_path("relative.json", None, {})
-        from_environment = forge_marker.resolve_marker_path(
-            None,
-            None,
-            {forge_marker.MARKER_PATH_ENV: "relative-env.json"},
-        )
+    def test_relative_marker_locations_are_rejected(self) -> None:
+        """A relative location resolves differently in the run and in the stop hook."""
+        with self.assertRaisesRegex(forge_marker.MarkerError, "--marker-dir"):
+            forge_marker.resolve_marker_path(None, "relative-dir", {})
+        with self.assertRaisesRegex(forge_marker.MarkerError, "--marker"):
+            forge_marker.resolve_marker_path("relative.json", None, {})
+        with self.assertRaisesRegex(forge_marker.MarkerError, forge_marker.MARKER_PATH_ENV):
+            forge_marker.resolve_marker_path(
+                None,
+                None,
+                {forge_marker.MARKER_PATH_ENV: "relative-env.json"},
+            )
+        with self.assertRaisesRegex(forge_marker.MarkerError, forge_marker.MARKER_DIR_ENV):
+            forge_marker.resolve_marker_path(
+                None,
+                None,
+                {forge_marker.MARKER_DIR_ENV: "relative-env-dir"},
+            )
 
-        for candidate in (relative_dir, relative_marker, from_environment):
+    def test_resolved_marker_paths_are_always_absolute(self) -> None:
+        candidates = [
+            forge_marker.resolve_marker_path("/tmp/explicit.json", None, {}),
+            forge_marker.resolve_marker_path(None, "/tmp/flag-dir", {}),
+            forge_marker.resolve_marker_path(
+                None,
+                None,
+                {forge_marker.MARKER_PATH_ENV: "/tmp/env-marker.json"},
+            ),
+            forge_marker.resolve_marker_path(None, None, {}),
+        ]
+
+        for candidate in candidates:
             self.assertTrue(candidate.is_absolute(), candidate)
         self.assertEqual(
-            Path.cwd() / "relative-dir" / forge_marker.MARKER_FILENAME,
-            relative_dir,
+            Path(forge_marker.DEFAULT_MARKER_DIR) / forge_marker.MARKER_FILENAME,
+            candidates[-1],
         )
+
+    def test_launcher_pins_the_marker_and_ignores_the_environment(self) -> None:
+        launcher = forge_marker.render_launcher(
+            marker_path="/tmp/space dir/run-marker.json",
+            predicate_path="/tmp/skill/completion-predicate.py",
+            python_executable="/usr/bin/python3",
+        )
+
+        self.assertIn("FORGE_RUN_MARKER='/tmp/space dir/run-marker.json'", launcher)
+        self.assertNotIn("FORGE_RUN_MARKER:-", launcher)
+        self.assertIn("PYTHONDONTWRITEBYTECODE=1", launcher)
+        self.assertIn("exec /usr/bin/python3 /tmp/skill/completion-predicate.py \"$@\"", launcher)
 
     def test_absolute_normalizes_without_resolving_symlinks(self) -> None:
         with tempfile.TemporaryDirectory() as base:
@@ -976,6 +999,121 @@ class CompletionGuardCommandTests(unittest.TestCase):
 
             self.assertNotEqual(0, refused.returncode)
             self.assertIn("group or world writable", refused.stderr)
+
+    def launcher_from(self, marker_dir: str, cwd: str, **environment: str):
+        values = self.environment()
+        values.update(environment)
+        return subprocess.run(
+            [str(Path(marker_dir) / forge_marker.LAUNCHER_FILENAME)],
+            capture_output=True,
+            text=True,
+            env=values,
+            cwd=cwd,
+            check=False,
+        )
+
+    def test_launcher_ignores_an_inherited_marker_override(self) -> None:
+        """A stale or foreign FORGE_RUN_MARKER must not retarget this run's guard."""
+        with tempfile.TemporaryDirectory() as run_dir, \
+                tempfile.TemporaryDirectory() as marker_dir, \
+                tempfile.TemporaryDirectory() as elsewhere:
+            self.initialized_run(run_dir, marker_dir)
+
+            for override in ("relative/run-marker.json", str(Path(elsewhere) / "stale.json")):
+                with self.subTest(override=override):
+                    result = self.launcher_from(
+                        marker_dir,
+                        elsewhere,
+                        FORGE_RUN_MARKER=override,
+                    )
+
+                    self.assertEqual(1, result.returncode, result.stdout)
+                    self.assertEqual(
+                        "incomplete",
+                        json.loads(result.stdout.strip().splitlines()[-1])["status"],
+                    )
+
+    def test_launcher_verdict_is_independent_of_working_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir, \
+                tempfile.TemporaryDirectory() as marker_dir, \
+                tempfile.TemporaryDirectory() as elsewhere:
+            self.initialized_run(run_dir, marker_dir)
+
+            for cwd in (marker_dir, elsewhere, str(SKILL_DIR)):
+                with self.subTest(cwd=cwd):
+                    result = self.launcher_from(marker_dir, cwd)
+
+                    self.assertEqual(1, result.returncode, result.stdout)
+                    self.assertEqual(
+                        "incomplete",
+                        json.loads(result.stdout.strip().splitlines()[-1])["status"],
+                    )
+
+    def test_predicate_reports_a_verdict_for_a_relative_marker_location(self) -> None:
+        with tempfile.TemporaryDirectory() as elsewhere:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS_DIR / "completion-predicate.py"),
+                    "--marker-dir",
+                    "relative-dir",
+                ],
+                capture_output=True,
+                text=True,
+                env=self.environment(),
+                cwd=elsewhere,
+                check=False,
+            )
+
+            self.assertEqual(1, result.returncode)
+            payload = json.loads(result.stdout.strip().splitlines()[-1])
+            self.assertEqual("incomplete", payload["status"])
+            self.assertIn("absolute path", payload["reason"])
+
+    def test_init_rejects_a_relative_marker_location(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir, tempfile.TemporaryDirectory() as elsewhere:
+            state_path = Path(run_dir) / "extraction-state.json"
+            state_path.write_text(json.dumps(discovered_state(run_dir)), encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS_DIR / "run-marker.py"),
+                    "init",
+                    "--state",
+                    str(state_path),
+                    "--marker-dir",
+                    "relative-dir",
+                ],
+                capture_output=True,
+                text=True,
+                env=self.environment(),
+                cwd=elsewhere,
+                check=False,
+            )
+
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("absolute path", result.stderr)
+            self.assertFalse((Path(elsewhere) / "relative-dir").exists())
+
+    def test_clear_reports_whether_the_launcher_was_actually_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir, tempfile.TemporaryDirectory() as marker_dir:
+            state_path = self.initialized_run(run_dir, marker_dir)
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            complete_all_batches(state)
+            controller.finalize_extraction(state)
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            self.run_marker("finish", "--marker-dir", marker_dir)
+
+            first = self.run_marker("clear", "--purge", "--marker-dir", marker_dir, "--out", str(Path(run_dir) / "a.json"))
+            self.assertEqual(0, first.returncode, first.stderr)
+            self.assertTrue(json.loads(Path(run_dir, "a.json").read_text())["launcherRemoved"])
+
+            second = self.run_marker("clear", "--purge", "--marker-dir", marker_dir, "--out", str(Path(run_dir) / "b.json"))
+            self.assertEqual(0, second.returncode, second.stderr)
+            report = json.loads(Path(run_dir, "b.json").read_text())
+            self.assertFalse(report["cleared"])
+            self.assertFalse(report["launcherRemoved"])
 
     def test_purge_cannot_remove_the_launcher_before_terminal_assertion(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir, tempfile.TemporaryDirectory() as marker_dir:
