@@ -38,7 +38,12 @@ For `hold_as_pattern_only`, do not change repository skill files.
 Every created or changed skill must:
 
 - use a kebab-case directory and matching frontmatter `name`;
-- include a concise description stating what it does and when to use it;
+- include a concise description that answers both "When should this skill
+  load?" and "What does it help accomplish?" in either order, using explicit
+  activation language without requiring a fixed sentence template;
+- include every activation criterion needed to select the skill correctly in
+  the description, while leaving operational prerequisites and execution
+  details that matter only after loading in Conditions or the body;
 - include `generated-by: forge-agent`;
 - declare `**Abstraction level:** primitive|compositional|strategic`;
 - encode these required sections in order:
@@ -84,7 +89,9 @@ part of C/R/π/T cannot be grounded, record the gap and avoid inventing it.
 
 Before choosing create, improve, or merge:
 
-1. Simulate activation from only the proposed description and Conditions.
+1. Simulate activation from only the proposed description. Confirm it states
+   the capability or outcome and every criterion needed for correct selection;
+   no necessary trigger may appear only in Conditions or the body.
 2. Confirm a fresh agent can follow Interface and Policy without the source transcript.
 3. Confirm Termination distinguishes success from failure and gives a recovery action.
 4. Compare the proposed result with the source evidence and preserve exact values.

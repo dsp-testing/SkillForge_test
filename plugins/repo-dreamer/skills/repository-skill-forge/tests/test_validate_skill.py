@@ -34,10 +34,13 @@ USER_VALIDATOR = load_validator(
 )
 
 
-def skill_text(body: str) -> str:
+def skill_text(
+    body: str,
+    description: str = "Validate the example workflow. Use when example files change.",
+) -> str:
     return f"""---
 name: example-skill
-description: Validate the example workflow when relevant.
+description: {description}
 generated-by: forge-agent
 ---
 
@@ -79,17 +82,69 @@ Use the repository validation script.
 Only validate the example workflow."""
 
 
-class ValidateSkillConcisenessTests(unittest.TestCase):
-    def validate_body(self, body: str) -> list[str]:
+class ValidateSkillTests(unittest.TestCase):
+    def validate_skill(
+        self,
+        body: str | None = None,
+        description: str = "Validate the example workflow. Use when example files change.",
+    ) -> list[str]:
         with tempfile.TemporaryDirectory() as temporary:
             skill_dir = Path(temporary) / "example-skill"
             skill_dir.mkdir()
             path = skill_dir / "SKILL.md"
-            path.write_text(skill_text(body), encoding="utf-8")
+            path.write_text(
+                skill_text(body or minimal_body(), description),
+                encoding="utf-8",
+            )
             return VALIDATOR.validate(path)
 
+    def test_repository_and_user_forge_share_contracts(self) -> None:
+        self.assertEqual(VALIDATOR.ACTIVATION_RE.pattern, USER_VALIDATOR.ACTIVATION_RE.pattern)
+        self.assertEqual(VALIDATOR.ACTIVATION_RE.flags, USER_VALIDATOR.ACTIVATION_RE.flags)
+        self.assertEqual(VALIDATOR.REQUIRED_SECTIONS, USER_VALIDATOR.REQUIRED_SECTIONS)
+        self.assertEqual(VALIDATOR.OPTIONAL_SECTIONS, USER_VALIDATOR.OPTIONAL_SECTIONS)
+
+    def test_accepts_outcome_before_activation_criteria(self) -> None:
+        self.assertEqual(
+            [],
+            self.validate_skill(
+                description="Format, test, and lint the Go module. Use when changes touch `go/`."
+            ),
+        )
+
+    def test_accepts_activation_criteria_before_outcome(self) -> None:
+        self.assertEqual(
+            [],
+            self.validate_skill(
+                description=(
+                    "Load when changes touch `go/`. "
+                    "Validates the module with repository checks."
+                )
+            ),
+        )
+
+    def test_rejects_description_without_activation_trigger(self) -> None:
+        errors = self.validate_skill(
+            description="Format, test, and lint changes to the Go module."
+        )
+
+        self.assertIn("description must state when the skill should load", errors)
+
+    def test_rejects_description_without_explicit_activation_language(self) -> None:
+        errors = self.validate_skill(
+            description="Relevant to `go/` changes. Formats, tests, and lints the module."
+        )
+
+        self.assertIn("description must state when the skill should load", errors)
+
+    def test_rejects_activation_language_without_a_trigger(self) -> None:
+        for validator in (VALIDATOR, USER_VALIDATOR):
+            with self.subTest(validator=validator.__name__):
+                self.assertIsNone(validator.ACTIVATION_RE.search("Use when."))
+                self.assertIsNone(validator.ACTIVATION_RE.search("Use for."))
+
     def test_accepts_required_sections_without_optional_sections(self) -> None:
-        self.assertEqual([], self.validate_body(minimal_body()))
+        self.assertEqual([], self.validate_skill())
 
     def test_accepts_optional_sections_when_they_add_guidance(self) -> None:
         body = minimal_body().replace(
@@ -101,7 +156,7 @@ Missing dependencies can make checks unavailable.
 ## Assets and scripts""",
         )
 
-        self.assertEqual([], self.validate_body(body))
+        self.assertEqual([], self.validate_skill(body))
 
     def test_rejects_repeated_guidance_across_sections(self) -> None:
         repeated = "Run unit tests before publishing."
@@ -134,7 +189,7 @@ Use the repository validation script.
 
 Only validate the example workflow."""
 
-        errors = self.validate_body(body)
+        errors = self.validate_skill(body)
 
         self.assertTrue(
             any(error.startswith("guidance is repeated in ") for error in errors),
@@ -147,7 +202,28 @@ Only validate the example workflow."""
             "Explain when a generated skill needs an `## Always do` section.",
         )
 
-        self.assertEqual([], self.validate_body(body))
+        self.assertEqual([], self.validate_skill(body))
+
+    def test_ignores_section_headings_inside_fenced_templates(self) -> None:
+        body = minimal_body().replace(
+            "Standardize validation for the example workflow.",
+            """Standardize validation for the example workflow.
+
+```markdown
+## Always do
+## Purpose
+```""",
+        )
+
+        self.assertEqual([], self.validate_skill(body))
+
+    def test_rejects_scope_section_with_only_abstraction_marker(self) -> None:
+        body = minimal_body().replace("Only validate the example workflow.", "")
+
+        self.assertIn(
+            "section is empty: ## Scope boundaries",
+            self.validate_skill(body),
+        )
 
     def test_accepts_short_executable_policy(self) -> None:
         body = minimal_body().replace(
@@ -155,11 +231,7 @@ Only validate the example workflow."""
             "Run `make test`.",
         )
 
-        self.assertEqual([], self.validate_body(body))
-
-    def test_repository_and_user_forge_share_conciseness_contract(self) -> None:
-        self.assertEqual(VALIDATOR.REQUIRED_SECTIONS, USER_VALIDATOR.REQUIRED_SECTIONS)
-        self.assertEqual(VALIDATOR.OPTIONAL_SECTIONS, USER_VALIDATOR.OPTIONAL_SECTIONS)
+        self.assertEqual([], self.validate_skill(body))
 
 
 if __name__ == "__main__":

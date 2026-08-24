@@ -36,6 +36,11 @@ SECTION_ORDER = (
     "## Scope boundaries",
 )
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+ACTIVATION_RE = re.compile(
+    r"\b(?:use|load|invoke|apply)(?:\s+this\s+skill)?\s+"
+    r"(?:when|whenever|for)\b\s+(?=[^.\n]*[a-z0-9`])",
+    re.IGNORECASE,
+)
 ABSTRACTION_RE = re.compile(
     r"\*\*Abstraction level:\*\*\s*(primitive|compositional|strategic)\b",
     re.IGNORECASE,
@@ -48,6 +53,24 @@ def normalized_guidance(line: str) -> str | None:
         return None
     words = re.findall(r"[a-z0-9]+", value.lower())
     return " ".join(words) if words else None
+
+
+def markdown_headings(text: str) -> list[re.Match[str]]:
+    headings: list[re.Match[str]] = []
+    fence: str | None = None
+    for match in re.finditer(r"^.*$", text, re.MULTILINE):
+        line = match.group(0)
+        fence_match = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if fence_match:
+            marker = fence_match.group(1)
+            if fence is None:
+                fence = marker
+            elif marker[0] == fence[0] and len(marker) >= len(fence):
+                fence = None
+            continue
+        if fence is None and re.fullmatch(r"## [^\n]+", line):
+            headings.append(match)
+    return headings
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
@@ -90,10 +113,15 @@ def validate(path: Path) -> list[str]:
         errors.append(f"name must match parent directory: expected {path.parent.name}")
     if frontmatter.get("generated-by") != "forge-agent":
         errors.append("generated-by must be forge-agent")
+    description = frontmatter.get("description", "")
+    if description and not 1 <= len(description) <= 1024:
+        errors.append("description must contain 1-1024 characters")
+    if description and not ACTIVATION_RE.search(description):
+        errors.append("description must state when the skill should load")
     if not re.search(r"^# .+", body, re.MULTILINE):
         errors.append("missing skill title")
 
-    heading_matches = list(re.finditer(r"^## [^\n]+$", body, re.MULTILINE))
+    heading_matches = markdown_headings(body)
     section_matches = [
         (match.group(0), match.start(), match.end(), position)
         for position, match in enumerate(heading_matches)
@@ -123,10 +151,10 @@ def validate(path: Path) -> list[str]:
             else len(body)
         )
         content = body[content_start:end].strip()
-        if not content:
+        guidance = [(line, normalized_guidance(line)) for line in content.splitlines()]
+        if not any(normalized for _line, normalized in guidance):
             errors.append(f"section is empty: {section}")
-        for line in content.splitlines():
-            normalized = normalized_guidance(line)
+        for line, normalized in guidance:
             if not normalized:
                 continue
             first_section = repeated_guidance.get(normalized)

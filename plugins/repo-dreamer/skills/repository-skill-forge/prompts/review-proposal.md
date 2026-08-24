@@ -18,11 +18,18 @@ Return JSON with:
     "unresolvedConflictCount": 0,
     "executable": true,
     "branchSpecific": false,
+    "descriptionHasActivationCriteria": true,
+    "descriptionStatesOutcome": true,
+    "descriptionCoversNecessaryTriggers": true,
     "concise": true,
     "nonRedundant": true,
     "findings": []
 }
 ```
+
+The three `description*` fields are required and must be true for promoted
+proposals. For `hold_as_pattern_only`, which has no generated skill or
+description, omit those fields.
 
 Reject or revise the proposal when it:
 
@@ -33,6 +40,11 @@ Reject or revise the proposal when it:
 - duplicates or conflicts with an existing repository skill;
 - uses commands unsupported by repository evidence;
 - lacks a concrete success check or recovery behavior;
+- does not state in its description when the skill should load;
+- does not state in its description what the skill helps accomplish;
+- omits or materially narrows an activation criterion needed for correct skill
+  selection. Operational prerequisites and execution details that matter only
+  after loading may remain in Conditions or the body;
 - repeats the same trigger, requirement, command, boundary, or success
   condition across sections without adding operational meaning;
 - includes filler sections, commentary, or examples that can be removed
