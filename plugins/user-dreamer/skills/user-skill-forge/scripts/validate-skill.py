@@ -35,19 +35,6 @@ SECTION_ORDER = (
     "## Assets and scripts",
     "## Scope boundaries",
 )
-SECTION_MAX_WORDS = {
-    "## Purpose": 80,
-    "## Conditions (C)": 160,
-    "## Interface (R)": 160,
-    "## Policy (π)": 400,
-    "## Termination (T)": 120,
-    "## Always do": 120,
-    "## Never do": 120,
-    "## Gotchas / edge cases": 160,
-    "## Assets and scripts": 120,
-    "## Scope boundaries": 120,
-}
-MAX_BODY_WORDS = 1200
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 ABSTRACTION_RE = re.compile(
     r"\*\*Abstraction level:\*\*\s*(primitive|compositional|strategic)\b",
@@ -131,10 +118,6 @@ def validate(path: Path) -> list[str]:
         word_count = len(content.split())
         if word_count < minimum_words:
             errors.append(f"section is too thin to execute: {section}")
-        if word_count > SECTION_MAX_WORDS[section]:
-            errors.append(
-                f"section exceeds {SECTION_MAX_WORDS[section]} words: {section}"
-            )
         for line in content.splitlines():
             normalized = normalized_guidance(line)
             if not normalized:
@@ -147,8 +130,6 @@ def validate(path: Path) -> list[str]:
             else:
                 repeated_guidance[normalized] = section
 
-    if len(body.split()) > MAX_BODY_WORDS:
-        errors.append(f"skill body exceeds {MAX_BODY_WORDS} words")
     if not ABSTRACTION_RE.search(body):
         errors.append("missing abstraction level: primitive, compositional, or strategic")
     return errors

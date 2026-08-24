@@ -40,7 +40,6 @@ default-branch files or multiple sanitized evidence records.
 
 Keep generated skills concise:
 
-- target at most 800 words and never exceed the validator's 1200-word limit;
 - require Purpose, Conditions, Interface, Policy, Termination, Assets and
   scripts, and Scope boundaries, but add Always do, Never do, or Gotchas /
   edge cases only when the section contributes unique operational guidance;

@@ -141,45 +141,9 @@ Only validate the example workflow."""
             errors,
         )
 
-    def test_rejects_oversized_sections(self) -> None:
-        body = minimal_body().replace(
-            "Run the repository-supported checks in order and report a concrete failure before attempting recovery.",
-            " ".join(["policy"] * 401),
-        )
-
-        self.assertIn(
-            "section exceeds 400 words: ## Policy (π)",
-            self.validate_body(body),
-        )
-
-    def test_rejects_oversized_skill_body(self) -> None:
-        sections = (
-            ("## Purpose", "purpose", 80),
-            ("## Conditions (C)", "condition", 160),
-            ("## Interface (R)", "interface", 160),
-            ("## Policy (π)", "policy", 400),
-            ("## Termination (T)", "termination", 120),
-            ("## Always do", "always", 120),
-            ("## Never do", "never", 120),
-            ("## Gotchas / edge cases", "gotcha", 160),
-            ("## Assets and scripts", "asset", 120),
-            ("## Scope boundaries", "boundary", 120),
-        )
-        body = "\n\n".join(
-            f"{heading}\n\n{' '.join([word] * count)}"
-            for heading, word, count in sections
-        )
-
-        self.assertIn(
-            "skill body exceeds 1200 words",
-            self.validate_body(body),
-        )
-
     def test_repository_and_user_forge_share_conciseness_contract(self) -> None:
         self.assertEqual(VALIDATOR.REQUIRED_SECTIONS, USER_VALIDATOR.REQUIRED_SECTIONS)
         self.assertEqual(VALIDATOR.OPTIONAL_SECTIONS, USER_VALIDATOR.OPTIONAL_SECTIONS)
-        self.assertEqual(VALIDATOR.SECTION_MAX_WORDS, USER_VALIDATOR.SECTION_MAX_WORDS)
-        self.assertEqual(VALIDATOR.MAX_BODY_WORDS, USER_VALIDATOR.MAX_BODY_WORDS)
 
 
 if __name__ == "__main__":

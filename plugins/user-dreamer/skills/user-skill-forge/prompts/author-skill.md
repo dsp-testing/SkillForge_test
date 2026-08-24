@@ -56,10 +56,9 @@ Termination and Assets only when they add unique operational guidance. Do not
 create filler sections or restate triggers, requirements, commands, boundaries,
 or success conditions already captured elsewhere.
 
-Target at most 800 words and never exceed 1200 words. Keep Policy focused on
-the ordered workflow. Move reusable executable logic into `scripts/` only when
-it is generalizable, parameterized, and independently verifiable. Move bulky
-templates and examples into `assets/`.
+Keep Policy focused on the ordered workflow. Move reusable executable logic
+into `scripts/` only when it is generalizable, parameterized, and independently
+verifiable. Move bulky templates and examples into `assets/`.
 
 ## Evidence ledger
 
