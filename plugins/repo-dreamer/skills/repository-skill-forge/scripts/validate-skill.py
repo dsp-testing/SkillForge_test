@@ -24,6 +24,9 @@ REQUIRED_SECTIONS = (
     "## Scope boundaries",
 )
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+DESCRIPTION_RE = re.compile(
+    r"^Use when (?P<trigger>.+?) to (?P<outcome>.+?)[.!?]?$",
+)
 ABSTRACTION_RE = re.compile(
     r"\*\*Abstraction level:\*\*\s*(primitive|compositional|strategic)\b",
     re.IGNORECASE,
@@ -70,6 +73,11 @@ def validate(path: Path) -> list[str]:
         errors.append(f"name must match parent directory: expected {path.parent.name}")
     if frontmatter.get("generated-by") != "forge-agent":
         errors.append("generated-by must be forge-agent")
+    description = frontmatter.get("description", "")
+    if description and not DESCRIPTION_RE.fullmatch(description):
+        errors.append(
+            "description must use 'Use when <activation trigger> to <outcome>.'"
+        )
     if not re.search(r"^# .+", body, re.MULTILINE):
         errors.append("missing skill title")
 
