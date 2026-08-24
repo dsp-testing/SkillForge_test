@@ -46,22 +46,24 @@ Every created or changed skill must:
   details that matter only after loading in Conditions or the body;
 - include `generated-by: forge-agent`;
 - declare `**Abstraction level:** primitive|compositional|strategic`;
-- encode these sections in order:
+- encode these required sections in order:
     1. `# <Skill Title>`
     2. `## Purpose`
     3. `## Conditions (C)`
     4. `## Interface (R)`
     5. `## Policy (π)`
     6. `## Termination (T)`
-    7. `## Always do`
-    8. `## Never do`
-    9. `## Gotchas / edge cases`
-    10. `## Assets and scripts`
-    11. `## Scope boundaries`
+    7. `## Assets and scripts`
+    8. `## Scope boundaries`
 
-Keep the body operational and below approximately 5000 tokens. Move reusable
-executable logic into `scripts/` only when it is generalizable, parameterized,
-and independently verifiable. Move bulky templates and examples into `assets/`.
+Add `## Always do`, `## Never do`, or `## Gotchas / edge cases` between
+Termination and Assets only when they add unique operational guidance. Do not
+create filler sections or restate triggers, requirements, commands, boundaries,
+or success conditions already captured elsewhere.
+
+Keep Policy focused on the ordered workflow. Move reusable executable logic
+into `scripts/` only when it is generalizable, parameterized, and independently
+verifiable. Move bulky templates and examples into `assets/`.
 
 ## Evidence ledger
 
@@ -96,6 +98,7 @@ Before choosing create, improve, or merge:
 5. Check nearby skills for trigger overlap, contradictory policy, and lost behavior.
 6. For improvement or merge, identify the baseline behavior that must remain unchanged.
 7. For domain-specific examples, preserve structure but derive values from the current task.
+8. Remove repeated guidance and any section that adds no unique operational value.
 
 If the first validation fails, revise once. If the revised skill still fails,
 remove only the invalid Forge change and use `hold_as_pattern_only`.

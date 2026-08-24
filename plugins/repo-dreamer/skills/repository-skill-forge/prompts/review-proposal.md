@@ -21,6 +21,8 @@ Return JSON with:
     "descriptionHasActivationCriteria": true,
     "descriptionStatesOutcome": true,
     "descriptionCoversNecessaryTriggers": true,
+    "concise": true,
+    "nonRedundant": true,
     "findings": []
 }
 ```
@@ -39,6 +41,10 @@ Reject or revise the proposal when it:
 - omits or materially narrows an activation criterion needed for correct skill
   selection. Operational prerequisites and execution details that matter only
   after loading may remain in Conditions or the body;
+- repeats the same trigger, requirement, command, boundary, or success
+  condition across sections without adding operational meaning;
+- includes filler sections, commentary, or examples that can be removed
+  without reducing executability;
 - requires `gh` or independently authenticated GitHub access in Dreaming;
 - claims multi-user evidence when trusted user identity is unavailable.
 - assumes more than one proposal PR can be created or updated in a run;

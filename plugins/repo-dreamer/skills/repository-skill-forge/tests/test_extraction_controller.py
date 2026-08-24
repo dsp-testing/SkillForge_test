@@ -1091,6 +1091,8 @@ class ExtractionControllerTests(unittest.TestCase):
                 "descriptionHasActivationCriteria": True,
                 "descriptionStatesOutcome": True,
                 "descriptionCoversNecessaryTriggers": True,
+                "concise": True,
+                "nonRedundant": True,
             },
             "publication": {
                 "duplicate": False,
@@ -1107,6 +1109,8 @@ class ExtractionControllerTests(unittest.TestCase):
             "descriptionCoversNecessaryTriggers": (
                 "skill description omits necessary activation criteria"
             ),
+            "concise": "proposed skill is not concise",
+            "nonRedundant": "proposed skill repeats guidance",
         }
         for field, expected_error in review_requirements.items():
             with self.subTest(field=field):
