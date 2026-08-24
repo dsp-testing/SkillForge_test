@@ -169,8 +169,11 @@ controller state; it is not a second state machine.
   `$RUN_DIR/checkpoint-summary.json` on every `advance`. It includes a
   `findingDiagnostics` object (`findingCount`, `blockingFindingCount`,
   `advisoryFindingCount`, `findingsByKind`, `batchesWithFindings`) reporting
-  any secret-shaped findings from the batches most recently checkpointed, by
-  count and kind only; it never carries the matched text.
+  any *advisory* secret-shaped findings (`assigned_secret`) from the batches
+  most recently checkpointed, by count and kind only, never the matched
+  text. A *blocking* finding (a concrete credential shape) always fails the
+  batch closed instead of being promoted, so `blockingFindingCount` in a
+  returned summary is always `0`.
 - `blocker` and `blockerCount`
 
 ## Testing this plugin branch from a cloud agent run
