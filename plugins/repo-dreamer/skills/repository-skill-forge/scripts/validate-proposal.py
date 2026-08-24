@@ -77,6 +77,74 @@ def validate_extraction(document: dict[str, Any], errors: list[str]) -> None:
         errors.append("partial extraction requires toolEventFallbackEnabled")
 
 
+def validate_evaluation(document: dict[str, Any], errors: list[str]) -> None:
+    evaluation = document.get("evaluation")
+    if not isinstance(evaluation, dict):
+        errors.append("promoted proposals require evaluation")
+        return
+    if evaluation.get("engine") != "vally":
+        errors.append("proposal evaluation engine must be vally")
+    if evaluation.get("status") != "accepted" or evaluation.get("accepted") is not True:
+        errors.append("proposal evaluation must be accepted")
+    iteration = evaluation.get("iteration")
+    maximum = evaluation.get("maxIterations")
+    if (
+        not isinstance(iteration, int)
+        or isinstance(iteration, bool)
+        or iteration < 1
+        or not isinstance(maximum, int)
+        or isinstance(maximum, bool)
+        or maximum < iteration
+    ):
+        errors.append("proposal evaluation iteration bounds are invalid")
+    session_split = evaluation.get("sessionSplit")
+    if not isinstance(session_split, dict) or any(
+        not isinstance(session_split.get(name), int)
+        or isinstance(session_split.get(name), bool)
+        or session_split[name] < 1
+        for name in ("authoring", "development", "heldout")
+    ):
+        errors.append("proposal evaluation requires non-empty session splits")
+    assessment = evaluation.get("assessment")
+    if not isinstance(assessment, dict):
+        errors.append("proposal evaluation assessment is required")
+        return
+    if assessment.get("split") != "heldout" or assessment.get("passed") is not True:
+        errors.append("proposal evaluation requires a passing heldout assessment")
+    if assessment.get("failedGates") != []:
+        errors.append("proposal evaluation has failed gates")
+    if assessment.get("regressedCaseIds") != []:
+        errors.append("proposal evaluation has heldout regressions")
+    baseline = assessment.get("baselineScore")
+    treatment = assessment.get("treatmentScore")
+    metrics = assessment.get("metrics")
+    if (
+        not isinstance(baseline, (int, float))
+        or isinstance(baseline, bool)
+        or not 0 <= baseline <= 1
+        or not isinstance(treatment, (int, float))
+        or isinstance(treatment, bool)
+        or not 0 <= treatment <= 1
+    ):
+        errors.append("proposal evaluation scores are invalid")
+    if not isinstance(metrics, dict):
+        errors.append("proposal evaluation metrics are required")
+    else:
+        score_delta = metrics.get("scoreDelta")
+        if (
+            not isinstance(score_delta, (int, float))
+            or isinstance(score_delta, bool)
+            or (
+                isinstance(baseline, (int, float))
+                and not isinstance(baseline, bool)
+                and isinstance(treatment, (int, float))
+                and not isinstance(treatment, bool)
+                and abs(score_delta - (treatment - baseline)) > 1e-9
+            )
+        ):
+            errors.append("proposal evaluation score delta is invalid")
+
+
 def validate(document: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     decision = document.get("decision")
@@ -138,6 +206,8 @@ def validate(document: dict[str, Any]) -> list[str]:
         errors.append("hold decisions must not include a skillPath")
     if decision != "hold_as_pattern_only" and not document.get("skillPath"):
         errors.append("promoted decisions require a skillPath")
+    if decision != "hold_as_pattern_only":
+        validate_evaluation(document, errors)
     return errors
 
 

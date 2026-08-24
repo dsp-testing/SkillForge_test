@@ -1,6 +1,6 @@
 ---
 name: repository-skill-forge
-description: Analyze a fixed repository session window and publish at most one PR-reconciled skill proposal without durable issue state.
+description: Analyze a fixed repository session window, hill-climb one selected proposal with held-out Vally evaluation, and publish at most one PR-reconciled skill improvement.
 user-invocable: true
 ---
 
@@ -18,6 +18,10 @@ Use this skill only when:
 - Python 3.10 or later is available;
 - GitHub reads and writes use approved GitHub MCP tools;
 - the run has an isolated scratch directory outside the checkout.
+
+Vally must be available to publish a promoted proposal. If it is unavailable
+or cannot run with approved isolation, extraction and candidate analysis may
+still complete, but the selected proposal must be held rather than published.
 
 The workflow does not have trusted actor identity. User diversity remains
 explicitly unknown.
@@ -38,7 +42,14 @@ Inputs:
 - `minWindowMinutes`: default `15`;
 - `maxConcurrentBatches`: default `3`;
 - `enableToolEventFallback`: default `false`;
-- `allowPartial`: default `true`.
+- `allowPartial`: default `true`;
+- `maxEvalIterations`: default `3`;
+- `evalRunsPerCase`: default `3`;
+- `minEvalTreatmentScore`: default `0.8`;
+- `minEvalScoreDelta`: default `0.05`;
+- `maxEvalScoreStdDev`: default `0.15`;
+- `maxEvalTokenIncreaseRatio`: default `0.5`;
+- `maxEvalToolCallIncreaseRatio`: default `0.5`.
 
 There is no issue-backed state, host state path, cursor, observation ledger,
 proposal queue, or proposal history. Set `windowStart = windowEnd - windowHours`
@@ -273,11 +284,56 @@ Cluster eligible candidates by repository subject. Assign a stable
 `proposalVersion` from the complete proposal evidence and generated content.
 Assign deterministic non-negative `rank` values.
 
-Validate and independently review every proposal. Compare it with repository
-skills and the complete Forge PR catalog. Store each promoted proposal's marker
-with that proposal rather than in a shared run-level file. Set
-`GENERATED_SKILL_PATH` to the exact run-local `SKILL.md` authored for the
-proposal before running:
+Independently review every proposal. Compare it with repository skills and the
+complete Forge PR catalog. Validate every promoted run-local skill before it can
+be considered for selection. Set `GENERATED_SKILL_PATH` to the exact run-local
+`SKILL.md` authored for the proposal before running:
+
+```bash
+python3 "$SKILL_DIR/scripts/validate-skill.py" \
+  "$GENERATED_SKILL_PATH" \
+  --json
+```
+
+Do not yet run `validate-proposal.py`: promoted proposals require a terminal
+accepted evaluation summary, which does not exist before provisional selection.
+Description review remains mandatory before selection.
+
+### 6. Provisionally select and evaluate one proposal
+
+Reconcile the reviewed proposals against the complete PR catalog:
+
+```bash
+python3 "$SKILL_DIR/scripts/proposal-ledger.py" select \
+  --proposals "$RUN_DIR/proposals.json" \
+  --catalog "$RUN_DIR/proposal-catalog.json" \
+  --out "$RUN_DIR/proposal-selection.provisional.json"
+```
+
+Evaluate only the provisionally selected create/update proposal. This preserves
+the one-proposal mutation budget and avoids spending agent runs on deferred
+entries. If there is no provisional selection, skip evaluation and target
+resolution.
+
+Use the selected proposal's supporting sessions to build at least three
+sanitized, repository-grounded evaluation cases. Follow
+`reference/inner-loop-evaluation.md` exactly. The controller deterministically
+separates authoring, development, and held-out sessions, runs a fixed baseline,
+and permits at most three treatment revisions. Development failures may revise
+the proposal. Held-out failures reject it and must never feed another revision.
+
+The same Vally spec, model, checkout, permissions, and runtime configuration
+must be used for both arms. Baseline loads no proposed skill. Treatment loads
+only the exact selected proposal. Require measurable task-quality improvement,
+zero case regressions, no error-rate increase, and bounded token/tool overhead.
+If safe Vally execution, sufficient supporting sessions, or a verifiable task
+oracle is unavailable, change the selected proposal to `hold_as_pattern_only`
+for this run rather than publishing an unevaluated skill.
+
+After accepted held-out evaluation, copy
+`evaluation-summary.json` into the proposal's `evaluation` field. A revision
+must update `skillPath` and `proposalVersion` to the accepted iteration. Then
+run both validators and generate the persistent marker:
 
 ```bash
 python3 "$SKILL_DIR/scripts/validate-skill.py" \
@@ -293,15 +349,13 @@ python3 "$SKILL_DIR/scripts/proposal-ledger.py" marker \
   --out "$RUN_DIR/proposals/$PROPOSAL_KEY/proposal-marker.md"
 ```
 
-Both validators must pass after independent review and before marker generation.
-Do not promote or publish a proposal whose description review is incomplete.
-The marker is persistent PR metadata. Do not edit or remove it when updating a
-PR. It lets later stateless runs distinguish unchanged, revised, rejected,
-open, and merged proposals without an issue ledger.
+Both validators must pass after independent review and accepted held-out
+evaluation. Do not promote or publish a proposal whose description review or
+evaluation is incomplete. The marker is persistent PR metadata. Do not edit or
+remove it when updating a PR.
 
-### 6. Reconcile and publish at most one proposal
-
-Select from validated proposals against the complete PR catalog:
+Re-run reconciliation after evaluation because hill climbing may change the
+proposal version:
 
 ```bash
 python3 "$SKILL_DIR/scripts/proposal-ledger.py" select \
@@ -309,6 +363,12 @@ python3 "$SKILL_DIR/scripts/proposal-ledger.py" select \
   --catalog "$RUN_DIR/proposal-catalog.json" \
   --out "$RUN_DIR/proposal-selection.json"
 ```
+
+The final selected key must match the provisionally selected key. If final
+reconciliation no longer allows that proposal, publish nothing this run; do not
+evaluate a second proposal.
+
+### 7. Publish at most one proposal
 
 The selected entry contains `selection.marker`, generated directly from the
 selected proposal. Pass that exact value unchanged in the PR body; never use a
@@ -361,8 +421,8 @@ PYTHONPYCACHEPREFIX="$RUN_DIR/pycache" python3 "$SKILL_DIR/scripts/validate-publ
 ```
 
 Then review the final body against `prompts/review-pr-body.md`. Any validation
-or review finding blocks publication. Do not add with/without-skill evaluation
-claims in this workflow.
+or review finding blocks publication. Keep measured evaluation results in the
+Forge details block; do not turn them into unsupported user-facing claims.
 
 Set `$SELECTED_PROPOSAL_DIR` to the selected run-local skill directory and
 `$SKILL_PATH` to its repository-relative destination before the checkout
@@ -417,9 +477,10 @@ Discard run evidence when the automation finishes.
 ## Termination
 
 Success requires complete or disclosed-partial extraction, sanitized
-current-window evidence, complete open-and-closed PR reconciliation, no more
-than one PR create/update, and a persistent valid marker in every published
-Forge PR. The final report must derive its extraction status from a successful
+current-window evidence, complete open-and-closed PR reconciliation, accepted
+held-out Vally evaluation for every published promoted proposal, no more than
+one PR create/update, and a persistent valid marker in every published Forge
+PR. The final report must derive its extraction status from a successful
 `extraction-worker.py status --assert-terminal` result. It must never report
 `BLOCKED` when that command fails because status is `running`.
 
@@ -457,8 +518,14 @@ tool-call, output, context, or automation limit.
 - `scripts/aggregate-primitives.py`: current-run deduplication and scoring.
 - `scripts/proposal-ledger.py`: PR marker parsing, cataloging, reconciliation,
   and one-mutation selection.
+- `scripts/proposal-eval-controller.py`: deterministic session partitioning,
+  Vally action sequencing, metric gates, and bounded revision decisions.
 - `scripts/validate-publication.py`: final PR-body, clean-checkout,
   selected-path, content-equality, and leakage validation.
+- `reference/inner-loop-evaluation.md`: session-grounded case construction,
+  Vally result normalization, revision isolation, and acceptance procedure.
+- `prompts/revise-proposal.md`: development-failure-driven proposal revision
+  policy.
 - `scripts/session_queries.py`: materialized session queries and opt-in
   tool-event fallback SQL.
 - `reference/extraction-worker.md`: worker protocol, runtime boundary, measured

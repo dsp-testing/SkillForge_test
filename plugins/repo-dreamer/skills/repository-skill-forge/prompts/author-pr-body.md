@@ -86,6 +86,9 @@ After the four user-facing sections, add:
 - Extraction: complete
 - Validation: ...
 - Review findings: ...
+- Evaluation: accepted at iteration <N>
+- Held-out score: baseline <0.000>, with instructions <0.000>, delta <+0.000>
+- Evaluation overhead: errors <delta>, tokens <percentage>, tool calls <percentage>
 - Trusted-user diversity: unknown
 
 </details>
@@ -115,7 +118,7 @@ reconstruct it.
   that is unrelated to the proposed instructions;
 - a `/tmp/copilot-plugins/...` validation command;
 - raw session content or machine-specific paths;
-- measured with/without-instructions evaluation claims. Evaluation is a
-  separate future workflow.
+- measured evaluation claims outside the trailing Forge details block;
+- raw grader evidence, trajectories, prompts, or evaluation session hashes.
 
 Keep the visible user-facing portion under 500 words.

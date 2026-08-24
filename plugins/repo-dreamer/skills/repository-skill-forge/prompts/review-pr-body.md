@@ -13,7 +13,12 @@ Block publication when the body:
 - preserves irrelevant host pull request template sections or unchecked boxes;
 - contains a `/tmp`, home-directory, or plugin-cache verification path;
 - invents command output, changed-file counts, pass/fail results, commits,
-  timings, or an observed evaluation result;
+  timings, or an evaluation result not present in the accepted controller
+  summary;
+- puts evaluation metrics in the user-facing sections instead of the trailing
+  Forge details block;
+- omits the accepted iteration, held-out baseline/treatment/delta, or evaluation
+  overhead from the Forge details block;
 - makes a repository claim that is not supported by the proposed instructions
   and corroborating repository evidence;
 - hides partial extraction or other required limitations;

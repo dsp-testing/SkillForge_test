@@ -47,6 +47,23 @@ def proposal(*, partial: bool = False) -> dict[str, object]:
         "candidateIds": ["candidate-1", "candidate-2"],
         "decision": "create_skill",
         "extraction": extraction,
+        "evaluation": {
+            "status": "accepted",
+            "accepted": True,
+            "iteration": 2,
+            "assessment": {
+                "split": "heldout",
+                "baselineScore": 0.5,
+                "treatmentScore": 0.9,
+                "metrics": {
+                    "scoreDelta": 0.4,
+                    "errorRateIncrease": 0.0,
+                    "tokenIncreaseRatio": 0.2,
+                    "toolCallIncreaseRatio": 0.1,
+                    "wallTimeIncreaseRatio": 0.1,
+                },
+            },
+        },
     }
 
 
@@ -114,6 +131,9 @@ Open the proposed `SKILL.md` and compare its stack-mapping steps with the reposi
 - Extraction: {extraction["status"]}
 {coverage}- Validation: structural checks passed
 - Review findings: none
+- Evaluation: accepted at iteration 2
+- Held-out score: baseline 0.500, with instructions 0.900, delta +0.400
+- Evaluation overhead: errors +0.000, tokens +20.0%, tool calls +10.0%
 - Trusted-user diversity: unknown
 
 </details>

@@ -41,6 +41,9 @@ DETAIL_LABELS = (
     "Extraction",
     "Validation",
     "Review findings",
+    "Evaluation",
+    "Held-out score",
+    "Evaluation overhead",
     "Trusted-user diversity",
 )
 PARTIAL_DETAIL_LABELS = (
@@ -231,6 +234,14 @@ def coverage_text(extraction: dict[str, Any]) -> str | None:
     ):
         return f"{coverage * 100:.1f}%"
     return None
+
+
+def signed_decimal(value: float) -> str:
+    return f"{value:+.3f}"
+
+
+def signed_percentage(value: float) -> str:
+    return f"{value * 100:+.1f}%"
 
 
 def validate_body(
@@ -444,6 +455,74 @@ def validate_body(
                     "complete Forge details contain partial-only fields: "
                     + ", ".join(unexpected)
                 )
+
+    evaluation = proposal.get("evaluation")
+    if not isinstance(evaluation, dict):
+        errors.append("selected proposal evaluation is missing")
+    else:
+        iteration = evaluation.get("iteration")
+        assessment = evaluation.get("assessment")
+        if (
+            evaluation.get("status") != "accepted"
+            or evaluation.get("accepted") is not True
+            or not isinstance(iteration, int)
+            or isinstance(iteration, bool)
+            or iteration < 1
+        ):
+            errors.append("selected proposal evaluation is not accepted")
+        else:
+            expect_detail(
+                detail_values,
+                "Evaluation",
+                f"accepted at iteration {iteration}",
+                errors,
+            )
+        if not isinstance(assessment, dict) or assessment.get("split") != "heldout":
+            errors.append("selected proposal heldout assessment is missing")
+        else:
+            baseline = assessment.get("baselineScore")
+            treatment = assessment.get("treatmentScore")
+            metrics = assessment.get("metrics")
+            if (
+                not isinstance(baseline, (int, float))
+                or isinstance(baseline, bool)
+                or not isinstance(treatment, (int, float))
+                or isinstance(treatment, bool)
+            ):
+                errors.append("selected proposal heldout scores are invalid")
+            else:
+                delta = treatment - baseline
+                expect_detail(
+                    detail_values,
+                    "Held-out score",
+                    (
+                        f"baseline {baseline:.3f}, with instructions "
+                        f"{treatment:.3f}, delta {signed_decimal(delta)}"
+                    ),
+                    errors,
+                )
+            if not isinstance(metrics, dict):
+                errors.append("selected proposal evaluation metrics are missing")
+            else:
+                error_delta = metrics.get("errorRateIncrease")
+                token_delta = metrics.get("tokenIncreaseRatio")
+                tool_delta = metrics.get("toolCallIncreaseRatio")
+                if any(
+                    not isinstance(value, (int, float)) or isinstance(value, bool)
+                    for value in (error_delta, token_delta, tool_delta)
+                ):
+                    errors.append("selected proposal evaluation overhead is invalid")
+                else:
+                    expect_detail(
+                        detail_values,
+                        "Evaluation overhead",
+                        (
+                            f"errors {signed_decimal(float(error_delta))}, "
+                            f"tokens {signed_percentage(float(token_delta))}, "
+                            f"tool calls {signed_percentage(float(tool_delta))}"
+                        ),
+                        errors,
+                    )
 
     marker_signature = "repository-skill-forge-proposal:v1"
     if body.count(marker) != 1 or body.count(marker_signature) != 1:
