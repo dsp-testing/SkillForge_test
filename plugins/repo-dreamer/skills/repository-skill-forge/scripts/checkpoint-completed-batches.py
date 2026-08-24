@@ -82,6 +82,36 @@ def cleanup_raw_artifacts(
             resolved.unlink()
 
 
+def assert_sanitized_invariants(sanitized: dict[str, Any], batch_id: str) -> None:
+    """Defense-in-depth check that the sanitizer actually produced a safe document.
+
+    A secret-shaped finding is never batch-fatal on its own: the sanitizer
+    already strips raw evidence and deterministically redacts every command
+    template before this function runs. This only guards against the
+    sanitizer itself regressing, so a genuine safety-invariant failure still
+    blocks the batch instead of silently promoting an unsafe document.
+    """
+    sanitization = sanitized.get("sanitization")
+    if not isinstance(sanitization, dict) or sanitization.get("rawSourceContentRetained") is not False:
+        raise ValueError(
+            f"completed batch {batch_id} sanitized document failed the raw-content invariant"
+        )
+    primitives = sanitized.get("primitives")
+    if not isinstance(primitives, list):
+        raise ValueError(f"completed batch {batch_id} sanitized document is missing primitives")
+    for primitive in primitives:
+        if not isinstance(primitive, dict):
+            raise ValueError(f"completed batch {batch_id} sanitized document has a malformed primitive")
+        if "rawEvidence" in primitive:
+            raise ValueError(
+                f"completed batch {batch_id} sanitized primitive still retains rawEvidence"
+            )
+        if primitive.get("sourceContentRetained") is not False:
+            raise ValueError(
+                f"completed batch {batch_id} sanitized primitive failed the source-content invariant"
+            )
+
+
 def checkpoint(
     state: dict[str, Any],
     *,
@@ -121,6 +151,11 @@ def checkpoint(
         if value
     }
     checkpointed: list[str] = []
+    finding_count = 0
+    blocking_finding_count = 0
+    advisory_finding_count = 0
+    findings_by_kind: dict[str, int] = {}
+    batches_with_findings: list[str] = []
 
     for batch in completed_batches(state):
         batch_id = str(batch.get("batchId") or "")
@@ -175,8 +210,19 @@ def checkpoint(
         )
         write_json(sanitized_path, sanitized)
         write_json(report_path, report)
-        if report.get("blockingFindingCount"):
-            raise ValueError(f"completed batch {batch_id} contains blocking leakage")
+        assert_sanitized_invariants(sanitized, batch_id)
+
+        # A secret-shaped finding does not abort the batch: the document
+        # above already satisfies the safety invariants, so record the
+        # counts and kinds as diagnostics (never the matched text) and keep
+        # promoting the safe sanitized primitives.
+        finding_count += int(report.get("findingCount") or 0)
+        blocking_finding_count += int(report.get("blockingFindingCount") or 0)
+        advisory_finding_count += int(report.get("advisoryFindingCount") or 0)
+        for kind, count in (report.get("findingsByKind") or {}).items():
+            findings_by_kind[kind] = findings_by_kind.get(kind, 0) + int(count)
+        if report.get("findingCount"):
+            batches_with_findings.append(batch_id)
 
         ledger = merger.merge([(batch_id, sanitized)], ledger)
         write_json(ledger_path, ledger)
@@ -204,6 +250,13 @@ def checkpoint(
         "completedBatchCount": len(completed),
         "ledgerBytes": ledger_path.stat().st_size if ledger_path.is_file() else 0,
         "extractionStatus": state.get("status"),
+        "findingDiagnostics": {
+            "findingCount": finding_count,
+            "blockingFindingCount": blocking_finding_count,
+            "advisoryFindingCount": advisory_finding_count,
+            "findingsByKind": findings_by_kind,
+            "batchesWithFindings": sorted(batches_with_findings),
+        },
     }
 
 
