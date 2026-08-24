@@ -182,9 +182,21 @@ raw artifacts, and attaches final extraction coverage once the controller is
 terminal. A checkpoint failure becomes a terminal controller blocker so it can
 never be mistaken for unfinished `running` extraction.
 
+A secret-shaped finding in a batch's sanitizer report is never batch-fatal by
+itself: `sanitize-evidence.py` already strips `rawEvidence` and deterministically
+redacts every command template before the checkpoint promotes the batch, so a
+finding does not change what reaches the ledger. Checkpointing instead records
+finding counts and kinds as diagnostics, never the matched text, and only
+blocks a batch when the sanitizer fails outright, an artifact is malformed, or
+the sanitized document itself fails a safety invariant (retained raw content,
+or a primitive that still carries `rawEvidence`).
+
 Each checkpoint is also written to `$RUN_DIR/checkpoint-summary.json`, so the
 run marker's diagnostic snapshot reports current checkpoint coverage rather than
-model recollection.
+model recollection. That summary includes a `findingDiagnostics` object with
+`findingCount`, `blockingFindingCount`, `advisoryFindingCount`,
+`findingsByKind`, and `batchesWithFindings` for the batches processed by that
+checkpoint call.
 
 Immediately before any final response, publication decision, or run-directory
 cleanup, require:
