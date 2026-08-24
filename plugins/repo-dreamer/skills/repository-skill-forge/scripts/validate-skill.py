@@ -17,9 +17,21 @@ REQUIRED_SECTIONS = (
     "## Interface (R)",
     "## Policy (π)",
     "## Termination (T)",
+    "## Assets and scripts",
+    "## Scope boundaries",
+)
+OPTIONAL_SECTIONS = (
     "## Always do",
     "## Never do",
     "## Gotchas / edge cases",
+)
+SECTION_ORDER = (
+    "## Purpose",
+    "## Conditions (C)",
+    "## Interface (R)",
+    "## Policy (π)",
+    "## Termination (T)",
+    *OPTIONAL_SECTIONS,
     "## Assets and scripts",
     "## Scope boundaries",
 )
@@ -28,6 +40,14 @@ ABSTRACTION_RE = re.compile(
     r"\*\*Abstraction level:\*\*\s*(primitive|compositional|strategic)\b",
     re.IGNORECASE,
 )
+
+
+def normalized_guidance(line: str) -> str | None:
+    value = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", line.strip())
+    if not value or value.startswith(("#", "```", "**Abstraction level:**")):
+        return None
+    words = re.findall(r"[a-z0-9]+", value.lower())
+    return " ".join(words) if words else None
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
@@ -73,25 +93,49 @@ def validate(path: Path) -> list[str]:
     if not re.search(r"^# .+", body, re.MULTILINE):
         errors.append("missing skill title")
 
-    previous = -1
-    section_indexes: list[tuple[str, int]] = []
+    heading_matches = list(re.finditer(r"^## [^\n]+$", body, re.MULTILINE))
+    section_matches = [
+        (match.group(0), match.start(), match.end(), position)
+        for position, match in enumerate(heading_matches)
+        if match.group(0) in SECTION_ORDER
+    ]
+    section_counts = {
+        section: sum(match[0] == section for match in section_matches)
+        for section in SECTION_ORDER
+    }
     for section in REQUIRED_SECTIONS:
-        index = body.find(section)
-        if index == -1:
+        if section_counts[section] == 0:
             errors.append(f"missing section: {section}")
-            continue
-        if index < previous:
-            errors.append(f"section is out of order: {section}")
-        previous = index
-        section_indexes.append((section, index))
-    for position, (section, start) in enumerate(section_indexes):
-        end = section_indexes[position + 1][1] if position + 1 < len(section_indexes) else len(body)
-        content = body[start + len(section) : end].strip()
-        minimum_words = 12 if section == "## Policy (π)" else 4
-        if len(content.split()) < minimum_words:
-            errors.append(f"section is too thin to execute: {section}")
-    if len(body.split()) > 5000:
-        errors.append("skill body exceeds the 5000-token approximation")
+    for section, count in section_counts.items():
+        if count > 1:
+            errors.append(f"duplicate section: {section}")
+
+    expected_positions = {section: position for position, section in enumerate(SECTION_ORDER)}
+    for previous, current in zip(section_matches, section_matches[1:]):
+        if expected_positions[current[0]] < expected_positions[previous[0]]:
+            errors.append(f"section is out of order: {current[0]}")
+
+    repeated_guidance: dict[str, str] = {}
+    for section, _start, content_start, heading_position in section_matches:
+        end = (
+            heading_matches[heading_position + 1].start()
+            if heading_position + 1 < len(heading_matches)
+            else len(body)
+        )
+        content = body[content_start:end].strip()
+        if not content:
+            errors.append(f"section is empty: {section}")
+        for line in content.splitlines():
+            normalized = normalized_guidance(line)
+            if not normalized:
+                continue
+            first_section = repeated_guidance.get(normalized)
+            if first_section and first_section != section:
+                errors.append(
+                    f"guidance is repeated in {first_section} and {section}: {line.strip()}"
+                )
+            else:
+                repeated_guidance[normalized] = section
     if not ABSTRACTION_RE.search(body):
         errors.append("missing abstraction level: primitive, compositional, or strategic")
     return errors
