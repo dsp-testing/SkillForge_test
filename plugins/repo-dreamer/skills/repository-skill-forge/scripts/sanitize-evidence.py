@@ -21,12 +21,18 @@ TOKEN_PATTERNS = (
     (
         "private_key",
         re.compile(
-            # Match the full PEM block, not just the header: greedily match
-            # through a matching END marker, or, if none is present (a
-            # truncated command), fail closed by consuming the rest of the
-            # string so no key-body material can survive redaction.
-            r"-----BEGIN (?:RSA|EC|OPENSSH|DSA)? ?PRIVATE KEY-----"
-            r"(?:[\s\S]*?-----END (?:RSA|EC|OPENSSH|DSA)? ?PRIVATE KEY-----|[\s\S]*)"
+            # Match the full PEM block for *any* private-key label, not just
+            # a fixed list of algorithm prefixes, and not just the header:
+            # capture the label after BEGIN (e.g. "PRIVATE KEY",
+            # "RSA PRIVATE KEY", "ENCRYPTED PRIVATE KEY",
+            # "PGP PRIVATE KEY BLOCK") and require the matching END label so
+            # this never matches a public key or certificate block, which
+            # end in "PUBLIC KEY" / "CERTIFICATE" rather than "PRIVATE KEY".
+            # If no matching END label is found (a truncated command), fail
+            # closed by consuming the rest of the string so no key-body
+            # material can survive redaction.
+            r"-----BEGIN (?P<pem_label>(?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?)-----"
+            r"[\s\S]*?(?:-----END (?P=pem_label)-----|\Z)"
         ),
     ),
     ("bearer_token", re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}", re.IGNORECASE)),
