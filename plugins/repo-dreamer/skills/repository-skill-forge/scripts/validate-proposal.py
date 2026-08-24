@@ -111,12 +111,13 @@ def validate(document: dict[str, Any]) -> list[str]:
             errors.append("proposal is not executable")
         if review.get("branchSpecific") is True:
             errors.append("proposal is branch-specific")
-        if review.get("descriptionHasActivationCriteria") is not True:
-            errors.append("skill description lacks activation criteria")
-        if review.get("descriptionStatesOutcome") is not True:
-            errors.append("skill description lacks a concrete outcome")
-        if review.get("descriptionCoversNecessaryTriggers") is not True:
-            errors.append("skill description omits necessary activation criteria")
+        if decision != "hold_as_pattern_only":
+            if review.get("descriptionHasActivationCriteria") is not True:
+                errors.append("skill description lacks activation criteria")
+            if review.get("descriptionStatesOutcome") is not True:
+                errors.append("skill description lacks a concrete outcome")
+            if review.get("descriptionCoversNecessaryTriggers") is not True:
+                errors.append("skill description omits necessary activation criteria")
         if review.get("concise") is not True:
             errors.append("proposed skill is not concise")
         if review.get("nonRedundant") is not True:

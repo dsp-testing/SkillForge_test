@@ -27,6 +27,10 @@ Return JSON with:
 }
 ```
 
+The three `description*` fields are required and must be true for promoted
+proposals. For `hold_as_pattern_only`, which has no generated skill or
+description, omit those fields.
+
 Reject or revise the proposal when it:
 
 - contains usernames, home paths, credentials, internal tokens, or

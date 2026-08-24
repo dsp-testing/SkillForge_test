@@ -137,6 +137,12 @@ class ValidateSkillTests(unittest.TestCase):
 
         self.assertIn("description must state when the skill should load", errors)
 
+    def test_rejects_activation_language_without_a_trigger(self) -> None:
+        for validator in (VALIDATOR, USER_VALIDATOR):
+            with self.subTest(validator=validator.__name__):
+                self.assertIsNone(validator.ACTIVATION_RE.search("Use when."))
+                self.assertIsNone(validator.ACTIVATION_RE.search("Use for."))
+
     def test_accepts_required_sections_without_optional_sections(self) -> None:
         self.assertEqual([], self.validate_skill())
 
@@ -197,6 +203,27 @@ Only validate the example workflow."""
         )
 
         self.assertEqual([], self.validate_skill(body))
+
+    def test_ignores_section_headings_inside_fenced_templates(self) -> None:
+        body = minimal_body().replace(
+            "Standardize validation for the example workflow.",
+            """Standardize validation for the example workflow.
+
+```markdown
+## Always do
+## Purpose
+```""",
+        )
+
+        self.assertEqual([], self.validate_skill(body))
+
+    def test_rejects_scope_section_with_only_abstraction_marker(self) -> None:
+        body = minimal_body().replace("Only validate the example workflow.", "")
+
+        self.assertIn(
+            "section is empty: ## Scope boundaries",
+            self.validate_skill(body),
+        )
 
     def test_accepts_short_executable_policy(self) -> None:
         body = minimal_body().replace(
