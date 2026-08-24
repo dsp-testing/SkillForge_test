@@ -12,23 +12,28 @@ from pathlib import Path
 
 REQUIRED_FRONTMATTER = ("name", "description", "generated-by")
 REQUIRED_SECTIONS = (
+    "## Purpose",
     "## Conditions (C)",
     "## Interface (R)",
     "## Policy (π)",
     "## Termination (T)",
-)
-OPTIONAL_SECTIONS = (
-    "## Purpose",
-    "## Always do",
-    "## Never do",
-    "## Gotchas / edge cases",
     "## Assets and scripts",
     "## Scope boundaries",
 )
+OPTIONAL_SECTIONS = (
+    "## Always do",
+    "## Never do",
+    "## Gotchas / edge cases",
+)
 SECTION_ORDER = (
     "## Purpose",
-    *REQUIRED_SECTIONS,
-    *OPTIONAL_SECTIONS[1:],
+    "## Conditions (C)",
+    "## Interface (R)",
+    "## Policy (π)",
+    "## Termination (T)",
+    *OPTIONAL_SECTIONS,
+    "## Assets and scripts",
+    "## Scope boundaries",
 )
 SECTION_MAX_WORDS = {
     "## Purpose": 80,

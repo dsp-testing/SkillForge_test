@@ -41,9 +41,9 @@ default-branch files or multiple sanitized evidence records.
 Keep generated skills concise:
 
 - target at most 800 words and never exceed the validator's 1200-word limit;
-- require Conditions, Interface, Policy, and Termination, but add Purpose,
-  Always do, Never do, Gotchas / edge cases, Assets and scripts, or Scope
-  boundaries only when the section contributes unique operational guidance;
+- require Purpose, Conditions, Interface, Policy, Termination, Assets and
+  scripts, and Scope boundaries, but add Always do, Never do, or Gotchas /
+  edge cases only when the section contributes unique operational guidance;
 - state each trigger, requirement, command, boundary, and success condition
   once in the most appropriate section instead of paraphrasing it elsewhere;
 - keep Policy focused on the ordered workflow and move bulky examples,

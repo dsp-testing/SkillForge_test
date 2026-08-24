@@ -50,7 +50,11 @@ generated-by: forge-agent
 
 
 def minimal_body() -> str:
-    return """## Conditions (C)
+    return """## Purpose
+
+Standardize validation for the example workflow.
+
+## Conditions (C)
 
 Use this for relevant example changes.
 
@@ -64,7 +68,15 @@ Run the repository-supported checks in order and report a concrete failure befor
 
 ## Termination (T)
 
-Finish when all required checks pass."""
+Finish when all required checks pass.
+
+## Assets and scripts
+
+Use the repository validation script.
+
+## Scope boundaries
+
+Only validate the example workflow."""
 
 
 class ValidateSkillConcisenessTests(unittest.TestCase):
@@ -76,19 +88,18 @@ class ValidateSkillConcisenessTests(unittest.TestCase):
             path.write_text(skill_text(body), encoding="utf-8")
             return VALIDATOR.validate(path)
 
-    def test_accepts_only_core_operational_sections(self) -> None:
+    def test_accepts_required_sections_without_optional_sections(self) -> None:
         self.assertEqual([], self.validate_body(minimal_body()))
 
     def test_accepts_optional_sections_when_they_add_guidance(self) -> None:
-        body = """## Purpose
+        body = minimal_body().replace(
+            "## Assets and scripts",
+            """## Gotchas / edge cases
 
-Standardize validation for the example workflow.
+Missing dependencies can make checks unavailable.
 
-""" + minimal_body() + """
-
-## Gotchas / edge cases
-
-Missing dependencies can make checks unavailable."""
+## Assets and scripts""",
+        )
 
         self.assertEqual([], self.validate_body(body))
 
@@ -113,7 +124,15 @@ Stop immediately when a required check fails.
 
 ## Termination (T)
 
-Finish when all required checks pass."""
+Finish when all required checks pass.
+
+## Assets and scripts
+
+Use the repository validation script.
+
+## Scope boundaries
+
+Only validate the example workflow."""
 
         errors = self.validate_body(body)
 

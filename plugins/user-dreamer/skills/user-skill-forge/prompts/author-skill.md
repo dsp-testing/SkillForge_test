@@ -43,16 +43,18 @@ Every created or changed skill must:
 - declare `**Abstraction level:** primitive|compositional|strategic`;
 - encode these required sections in order:
     1. `# <Skill Title>`
-    2. `## Conditions (C)`
-    3. `## Interface (R)`
-    4. `## Policy (π)`
-    5. `## Termination (T)`
+    2. `## Purpose`
+    3. `## Conditions (C)`
+    4. `## Interface (R)`
+    5. `## Policy (π)`
+    6. `## Termination (T)`
+    7. `## Assets and scripts`
+    8. `## Scope boundaries`
 
-Add `## Purpose`, `## Always do`, `## Never do`, `## Gotchas / edge cases`,
-`## Assets and scripts`, or `## Scope boundaries` in their conventional order
-only when they add unique operational guidance. Do not create filler sections
-or restate triggers, requirements, commands, boundaries, or success conditions
-already captured elsewhere.
+Add `## Always do`, `## Never do`, or `## Gotchas / edge cases` between
+Termination and Assets only when they add unique operational guidance. Do not
+create filler sections or restate triggers, requirements, commands, boundaries,
+or success conditions already captured elsewhere.
 
 Target at most 800 words and never exceed 1200 words. Keep Policy focused on
 the ordered workflow. Move reusable executable logic into `scripts/` only when
