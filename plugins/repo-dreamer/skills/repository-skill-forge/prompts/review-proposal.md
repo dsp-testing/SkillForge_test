@@ -18,6 +18,8 @@ Return JSON with:
     "unresolvedConflictCount": 0,
     "executable": true,
     "branchSpecific": false,
+    "concise": true,
+    "nonRedundant": true,
     "findings": []
 }
 ```
@@ -31,6 +33,10 @@ Reject or revise the proposal when it:
 - duplicates or conflicts with an existing repository skill;
 - uses commands unsupported by repository evidence;
 - lacks a concrete success check or recovery behavior;
+- repeats the same trigger, requirement, command, boundary, or success
+  condition across sections without adding operational meaning;
+- includes filler sections, commentary, or examples that can be removed
+  without reducing executability;
 - requires `gh` or independently authenticated GitHub access in Dreaming;
 - claims multi-user evidence when trusted user identity is unavailable.
 - assumes more than one proposal PR can be created or updated in a run;

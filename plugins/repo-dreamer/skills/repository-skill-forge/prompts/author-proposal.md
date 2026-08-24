@@ -38,6 +38,17 @@ workflow as parameterized instructions and preserve exact commands only when
 they are repository-stable, non-secret, and independently corroborated by
 default-branch files or multiple sanitized evidence records.
 
+Keep generated skills concise:
+
+- target at most 800 words and never exceed the validator's 1200-word limit;
+- require Conditions, Interface, Policy, and Termination, but add Purpose,
+  Always do, Never do, Gotchas / edge cases, Assets and scripts, or Scope
+  boundaries only when the section contributes unique operational guidance;
+- state each trigger, requirement, command, boundary, and success condition
+  once in the most appropriate section instead of paraphrasing it elsewhere;
+- keep Policy focused on the ordered workflow and move bulky examples,
+  templates, or reusable logic into assets or scripts.
+
 For a promoted proposal:
 
 - write under `$RUN_DIR/proposals/<proposal-key>/<skill-name>/SKILL.md`;

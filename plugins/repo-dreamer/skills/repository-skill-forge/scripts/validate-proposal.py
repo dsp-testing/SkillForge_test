@@ -111,6 +111,10 @@ def validate(document: dict[str, Any]) -> list[str]:
             errors.append("proposal is not executable")
         if review.get("branchSpecific") is True:
             errors.append("proposal is branch-specific")
+        if review.get("concise") is not True:
+            errors.append("proposed skill is not concise")
+        if review.get("nonRedundant") is not True:
+            errors.append("proposed skill repeats guidance")
     publication = document.get("publication")
     if not isinstance(publication, dict):
         errors.append("publication policy is required")

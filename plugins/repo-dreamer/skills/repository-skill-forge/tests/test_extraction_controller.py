@@ -1088,6 +1088,8 @@ class ExtractionControllerTests(unittest.TestCase):
                 "unresolvedConflictCount": 0,
                 "executable": True,
                 "branchSpecific": False,
+                "concise": True,
+                "nonRedundant": True,
             },
             "publication": {
                 "duplicate": False,
@@ -1098,6 +1100,11 @@ class ExtractionControllerTests(unittest.TestCase):
         }
 
         self.assertEqual([], validator.validate(document))
+        document["review"]["concise"] = False
+        self.assertIn("proposed skill is not concise", validator.validate(document))
+        document["review"]["concise"] = True
+        document["review"]["nonRedundant"] = False
+        self.assertIn("proposed skill repeats guidance", validator.validate(document))
 
 if __name__ == "__main__":
     unittest.main()
