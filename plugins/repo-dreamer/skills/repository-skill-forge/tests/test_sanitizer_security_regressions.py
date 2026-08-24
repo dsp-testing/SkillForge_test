@@ -53,6 +53,20 @@ AGGREGATE_SPEC.loader.exec_module(aggregator)
 
 import test_extraction_worker as worker_tests  # noqa: E402
 
+SANITIZER_SPEC = importlib.util.spec_from_file_location(
+    "sanitize_evidence_security", SCRIPTS_DIR / "sanitize-evidence.py"
+)
+assert SANITIZER_SPEC is not None and SANITIZER_SPEC.loader is not None
+sanitizer = importlib.util.module_from_spec(SANITIZER_SPEC)
+SANITIZER_SPEC.loader.exec_module(sanitizer)
+
+VALIDATOR_SPEC = importlib.util.spec_from_file_location(
+    "validate_publication_security", SCRIPTS_DIR / "validate-publication.py"
+)
+assert VALIDATOR_SPEC is not None and VALIDATOR_SPEC.loader is not None
+validator = importlib.util.module_from_spec(VALIDATOR_SPEC)
+VALIDATOR_SPEC.loader.exec_module(validator)
+
 PEM_BODY = "MIIEREALPRIVATEKEYMATERIALTHATMUSTNEVERLEAK1234567890"
 PEM_COMMAND = (
     "cat deploy.pem\n"
@@ -161,15 +175,6 @@ def all_text(run_dir: Path) -> str:
 
 class PrivateKeyRemainsBlockingTests(unittest.TestCase):
     def test_pem_body_is_fully_redacted_by_the_sanitizer(self) -> None:
-        import sys as _sys
-
-        sanitizer_spec = importlib.util.spec_from_file_location(
-            "sanitize_evidence_pk", SCRIPTS_DIR / "sanitize-evidence.py"
-        )
-        assert sanitizer_spec is not None and sanitizer_spec.loader is not None
-        sanitizer = importlib.util.module_from_spec(sanitizer_spec)
-        sanitizer_spec.loader.exec_module(sanitizer)
-
         findings = sanitizer.findings(PEM_COMMAND, "evidence-1", "command")
         self.assertEqual(["private_key"], [item["kind"] for item in findings])
         self.assertEqual(["blocking"], [item["severity"] for item in findings])
@@ -248,6 +253,149 @@ class PrivateKeyRemainsBlockingTests(unittest.TestCase):
             )
             self.assertEqual(0, code)
             self.assertEqual("blocked", status["assertion"]["status"])
+
+
+# Every private-key label the generic pem_label pattern must cover, plus a
+# negative pair (public key / certificate) it must never match. Each entry is
+# (label, body-marker) so a truncated variant (no END line) can reuse the
+# same body while a genuine PEM block always closes with a matching END.
+PEM_LABEL_CASES: list[tuple[str, str]] = [
+    ("RSA PRIVATE KEY", "RSAKEYBODYMUSTNEVERLEAK1"),
+    ("EC PRIVATE KEY", "ECKEYBODYMUSTNEVERLEAK2"),
+    ("OPENSSH PRIVATE KEY", "OPENSSHKEYBODYMUSTNEVERLEAK3"),
+    ("DSA PRIVATE KEY", "DSAKEYBODYMUSTNEVERLEAK4"),
+    ("PRIVATE KEY", "PLAINKEYBODYMUSTNEVERLEAK5"),
+    ("ENCRYPTED PRIVATE KEY", "ENCRYPTEDKEYBODYMUSTNEVERLEAK6"),
+    ("PGP PRIVATE KEY BLOCK", "PGPKEYBODYMUSTNEVERLEAK7"),
+]
+NEGATIVE_PEM_CASES: list[tuple[str, str]] = [
+    ("PUBLIC KEY", "PUBLICKEYBODYISNOTASECRET1"),
+    ("RSA PUBLIC KEY", "PUBLICKEYBODYISNOTASECRET2"),
+    ("CERTIFICATE", "CERTIFICATEBODYISNOTASECRET3"),
+]
+
+
+def pem_block(label: str, body: str) -> str:
+    return f"-----BEGIN {label}-----\n{body}\n-----END {label}-----"
+
+
+def truncated_pem_block(label: str, body: str) -> str:
+    # No END line at all: the sanitizer must fail closed by redacting to the
+    # end of the string rather than leaving an unterminated key unmatched.
+    return f"-----BEGIN {label}-----\n{body}"
+
+
+class PemLabelCoverageTests(unittest.TestCase):
+    """Regression for the generic `pem_label` rewrite: every private-key
+    label variant (not just a fixed algorithm-prefix list) must be found,
+    fully redacted, and kept blocking; public keys and certificates,
+    which end in a different label, must never match."""
+
+    def test_every_private_key_label_is_found_and_fully_redacted(self) -> None:
+        for label, body in PEM_LABEL_CASES:
+            with self.subTest(label=label, truncated=False):
+                command = f"cat deploy.pem\n{pem_block(label, body)}\nafter"
+                findings = sanitizer.findings(command, "evidence-1", "command")
+                self.assertEqual(["private_key"], [item["kind"] for item in findings])
+                self.assertEqual(["blocking"], [item["severity"] for item in findings])
+                redacted = sanitizer.redact(command)
+                self.assertNotIn(body, redacted)
+                self.assertNotIn(f"-----END {label}-----", redacted)
+                self.assertIn("after", redacted)
+
+            with self.subTest(label=label, truncated=True):
+                truncated = f"cat deploy.pem\n{truncated_pem_block(label, body)}"
+                findings = sanitizer.findings(truncated, "evidence-1", "command")
+                self.assertEqual(["private_key"], [item["kind"] for item in findings])
+                redacted = sanitizer.redact(truncated)
+                self.assertNotIn(body, redacted)
+
+    def test_public_keys_and_certificates_are_never_flagged_as_private_key(self) -> None:
+        for label, body in NEGATIVE_PEM_CASES:
+            with self.subTest(label=label):
+                command = pem_block(label, body)
+                findings = sanitizer.findings(command, "evidence-1", "command")
+                self.assertEqual([], findings)
+                self.assertEqual(command, sanitizer.redact(command))
+
+    def test_encrypted_and_pgp_batches_still_fail_closed_before_merge(self) -> None:
+        for label, body in [
+            ("ENCRYPTED PRIVATE KEY", "ENCRYPTEDBATCHBODYMUSTNEVERLEAK"),
+            ("PGP PRIVATE KEY BLOCK", "PGPBATCHBODYMUSTNEVERLEAK"),
+        ]:
+            for truncated in (False, True):
+                with self.subTest(label=label, truncated=truncated):
+                    with tempfile.TemporaryDirectory() as temporary:
+                        run_dir = Path(temporary)
+                        command = (
+                            truncated_pem_block(label, body)
+                            if truncated
+                            else pem_block(label, body)
+                        )
+                        state = build_state(
+                            run_dir,
+                            [
+                                ("batch-1", "session-1", BENIGN_COMMAND),
+                                ("batch-2", "session-2", command),
+                            ],
+                        )
+                        ledger_path = run_dir / "primitives.sanitized.json"
+
+                        with self.assertRaises(ValueError) as raised:
+                            checkpoint.checkpoint(
+                                state, ledger_path=ledger_path, main_branches={"main"}
+                            )
+                        self.assertIn("batch-2", str(raised.exception))
+                        self.assertIn("blocking leakage", str(raised.exception))
+
+                        if ledger_path.is_file():
+                            ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+                            self.assertEqual(["batch-1"], ledger.get("processedBatchIds", []))
+                            self.assertNotIn(body, json.dumps(ledger))
+                        sanitized_path = (
+                            run_dir / "batches" / "batch-2" / "primitives.sanitized.json"
+                        )
+                        self.assertNotIn(body, sanitized_path.read_text(encoding="utf-8"))
+
+    def test_validate_publication_rejects_unsanitized_encrypted_and_pgp_forms(self) -> None:
+        for label, body in [
+            ("ENCRYPTED PRIVATE KEY", "ENCRYPTEDCHECKOUTBODYMUSTNEVERLEAK"),
+            ("PGP PRIVATE KEY BLOCK", "PGPCHECKOUTBODYMUSTNEVERLEAK"),
+        ]:
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as temporary:
+                    import subprocess
+
+                    root = Path(temporary)
+                    repository = root / "repository"
+                    source = root / "example"
+                    repository.mkdir()
+                    source.mkdir()
+                    subprocess.run(["git", "-C", str(repository), "init", "-q"], check=True)
+                    subprocess.run(
+                        ["git", "-C", str(repository), "config", "user.email", "forge@example.test"],
+                        check=True,
+                    )
+                    subprocess.run(
+                        ["git", "-C", str(repository), "config", "user.name", "Forge Test"],
+                        check=True,
+                    )
+                    (repository / "README.md").write_text("baseline\n", encoding="utf-8")
+                    subprocess.run(["git", "-C", str(repository), "add", "README.md"], check=True)
+                    subprocess.run(
+                        ["git", "-C", str(repository), "commit", "-qm", "baseline"], check=True
+                    )
+                    (source / "SKILL.md").write_text(pem_block(label, body) + "\n", encoding="utf-8")
+                    destination = repository / "skills" / "example"
+                    destination.mkdir(parents=True)
+                    (destination / "SKILL.md").write_bytes((source / "SKILL.md").read_bytes())
+
+                    errors, _expected, _pending = validator.validate_checkout(
+                        repository, source, "skills/example"
+                    )
+
+                    self.assertTrue(any("sensitive content" in error for error in errors))
+                    self.assertNotIn(body, json.dumps(errors))
 
 
 class WhitespaceSeparatedAssignedSecretTests(unittest.TestCase):
