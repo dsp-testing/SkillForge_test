@@ -42,13 +42,15 @@ For a promoted proposal:
 
 - write under `$RUN_DIR/proposals/<proposal-key>/<skill-name>/SKILL.md`;
 - include `generated-by: forge-agent`;
-- write the frontmatter description as
-  `Use when <activation trigger> to <outcome>.` so the model can decide whether
-  to load the skill and understand what loading it accomplishes without reading
-  the body;
-- keep the activation trigger specific enough to distinguish this skill from
-  other repository skills, and state the concrete result rather than repeating
-  the skill name;
+- make the frontmatter description answer both "When should this skill load?"
+  and "What does it help accomplish?" in either order and without requiring a
+  fixed sentence template;
+- use explicit activation language such as `Use when`, `Use for`, `Load when`,
+  or an equivalent phrase, and state a concrete capability or outcome rather
+  than repeating the skill name;
+- include every activation criterion needed to select the skill correctly.
+  Keep operational prerequisites and execution details that matter only after
+  loading in Conditions or the body;
 - include the required C/R/pi/T sections accepted by `validate-skill.py`;
 - cite candidate IDs and repository artifacts in the proposal summary, not in
   generated instructions where they would distract future execution;

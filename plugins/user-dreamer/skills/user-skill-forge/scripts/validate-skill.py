@@ -24,6 +24,11 @@ REQUIRED_SECTIONS = (
     "## Scope boundaries",
 )
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+ACTIVATION_RE = re.compile(
+    r"\b(?:use|load|invoke|apply)(?:\s+this\s+skill)?\s+"
+    r"(?:when|whenever|for)\b",
+    re.IGNORECASE,
+)
 ABSTRACTION_RE = re.compile(
     r"\*\*Abstraction level:\*\*\s*(primitive|compositional|strategic)\b",
     re.IGNORECASE,
@@ -71,6 +76,8 @@ def validate(path: Path) -> list[str]:
     description = frontmatter.get("description", "")
     if description and not 1 <= len(description) <= 1024:
         errors.append("description must contain 1-1024 characters")
+    if description and not ACTIVATION_RE.search(description):
+        errors.append("description must state when the skill should load")
     if frontmatter.get("generated-by") != "forge-agent":
         errors.append("generated-by must be forge-agent")
 

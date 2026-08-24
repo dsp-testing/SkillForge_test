@@ -18,6 +18,9 @@ Return JSON with:
     "unresolvedConflictCount": 0,
     "executable": true,
     "branchSpecific": false,
+    "descriptionHasActivationCriteria": true,
+    "descriptionStatesOutcome": true,
+    "descriptionCoversNecessaryTriggers": true,
     "findings": []
 }
 ```
@@ -31,6 +34,11 @@ Reject or revise the proposal when it:
 - duplicates or conflicts with an existing repository skill;
 - uses commands unsupported by repository evidence;
 - lacks a concrete success check or recovery behavior;
+- does not state in its description when the skill should load;
+- does not state in its description what the skill helps accomplish;
+- omits or materially narrows an activation criterion needed for correct skill
+  selection. Operational prerequisites and execution details that matter only
+  after loading may remain in Conditions or the body;
 - requires `gh` or independently authenticated GitHub access in Dreaming;
 - claims multi-user evidence when trusted user identity is unavailable.
 - assumes more than one proposal PR can be created or updated in a run;

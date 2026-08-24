@@ -16,6 +16,18 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC is not None and SPEC.loader is not None
 VALIDATOR = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(VALIDATOR)
+USER_VALIDATOR_SPEC = importlib.util.spec_from_file_location(
+    "user_validate_skill",
+    SKILL_DIR.parents[2]
+    / "user-dreamer"
+    / "skills"
+    / "user-skill-forge"
+    / "scripts"
+    / "validate-skill.py",
+)
+assert USER_VALIDATOR_SPEC is not None and USER_VALIDATOR_SPEC.loader is not None
+USER_VALIDATOR = importlib.util.module_from_spec(USER_VALIDATOR_SPEC)
+USER_VALIDATOR_SPEC.loader.exec_module(USER_VALIDATOR)
 
 
 def skill_text(description: str) -> str:
@@ -80,12 +92,31 @@ class ValidateSkillDescriptionTests(unittest.TestCase):
             path.write_text(skill_text(description), encoding="utf-8")
             return VALIDATOR.validate(path)
 
-    def test_accepts_activation_trigger_and_outcome(self) -> None:
-        errors = self.validate_description(
-            "Use when changes touch `go/` to format, test, and lint the Go module."
+    def test_repository_and_user_forge_share_activation_contract(self) -> None:
+        self.assertEqual(
+            VALIDATOR.ACTIVATION_RE.pattern,
+            USER_VALIDATOR.ACTIVATION_RE.pattern,
+        )
+        self.assertEqual(
+            VALIDATOR.ACTIVATION_RE.flags,
+            USER_VALIDATOR.ACTIVATION_RE.flags,
         )
 
-        self.assertEqual([], errors)
+    def test_accepts_outcome_before_activation_criteria(self) -> None:
+        self.assertEqual(
+            [],
+            self.validate_description(
+                "Format, test, and lint the Go module. Use when changes touch `go/`."
+            ),
+        )
+
+    def test_accepts_activation_criteria_before_outcome(self) -> None:
+        self.assertEqual(
+            [],
+            self.validate_description(
+                "Load when changes touch `go/`. Validates the module with repository checks."
+            ),
+        )
 
     def test_rejects_description_without_activation_trigger(self) -> None:
         errors = self.validate_description(
@@ -93,15 +124,17 @@ class ValidateSkillDescriptionTests(unittest.TestCase):
         )
 
         self.assertIn(
-            "description must use 'Use when <activation trigger> to <outcome>.'",
+            "description must state when the skill should load",
             errors,
         )
 
-    def test_rejects_description_without_outcome(self) -> None:
-        errors = self.validate_description("Use when changes touch `go/`.")
+    def test_rejects_description_without_explicit_activation_language(self) -> None:
+        errors = self.validate_description(
+            "Relevant to `go/` changes. Formats, tests, and lints the module."
+        )
 
         self.assertIn(
-            "description must use 'Use when <activation trigger> to <outcome>.'",
+            "description must state when the skill should load",
             errors,
         )
 
