@@ -36,6 +36,23 @@ TOKEN_PATTERNS = (
 )
 
 
+# `assigned_secret` matches an assignment shape (`token = <long value>`), not a
+# recognized credential format. It is the heuristic responsible for
+# false positives such as computed references, environment lookups, and
+# dotted identifiers. Every other kind matches a concrete, near-deterministic
+# secret shape (a GitHub token prefix, an AWS access key ID, a PEM header, or
+# a bearer token). Classify `assigned_secret` as advisory and everything else
+# as blocking so operators can distinguish heuristic noise from confirmed
+# shapes in diagnostics. This label is informational only: `redact()` always
+# substitutes every matched pattern regardless of severity, so no finding
+# kind changes what gets written into the sanitized document.
+ADVISORY_FINDING_KINDS = {"assigned_secret"}
+
+
+def finding_severity(kind: str) -> str:
+    return "advisory" if kind in ADVISORY_FINDING_KINDS else "blocking"
+
+
 def redact(value: str) -> str:
     value = HOME_PATH_RE.sub("~", value)
     value = WINDOWS_HOME_RE.sub("~", value)
@@ -63,7 +80,7 @@ def findings(value: str, evidence_key: str, field: str) -> list[dict[str, str]]:
                     "evidenceKey": evidence_key,
                     "field": field,
                     "kind": kind,
-                    "severity": "blocking",
+                    "severity": finding_severity(kind),
                 }
             )
     return result
@@ -123,10 +140,15 @@ def sanitize(
             }
         )
 
+    findings_by_kind: dict[str, int] = {}
+    for item in leakage_findings:
+        findings_by_kind[item["kind"]] = findings_by_kind.get(item["kind"], 0) + 1
     report = {
         "schemaVersion": 1,
         "findingCount": len(leakage_findings),
         "blockingFindingCount": sum(item["severity"] == "blocking" for item in leakage_findings),
+        "advisoryFindingCount": sum(item["severity"] == "advisory" for item in leakage_findings),
+        "findingsByKind": findings_by_kind,
         "findings": leakage_findings,
     }
     return (
