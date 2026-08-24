@@ -104,7 +104,7 @@ Missing dependencies can make checks unavailable.
         self.assertEqual([], self.validate_body(body))
 
     def test_rejects_repeated_guidance_across_sections(self) -> None:
-        repeated = "Run the repository checks once and report the concrete result."
+        repeated = "Run unit tests before publishing."
         body = f"""## Purpose
 
 {repeated}
@@ -140,6 +140,22 @@ Only validate the example workflow."""
             any(error.startswith("guidance is repeated in ") for error in errors),
             errors,
         )
+
+    def test_ignores_section_names_outside_exact_headings(self) -> None:
+        body = minimal_body().replace(
+            "Standardize validation for the example workflow.",
+            "Explain when a generated skill needs an `## Always do` section.",
+        )
+
+        self.assertEqual([], self.validate_body(body))
+
+    def test_accepts_short_executable_policy(self) -> None:
+        body = minimal_body().replace(
+            "Run the repository-supported checks in order and report a concrete failure before attempting recovery.",
+            "Run `make test`.",
+        )
+
+        self.assertEqual([], self.validate_body(body))
 
     def test_repository_and_user_forge_share_conciseness_contract(self) -> None:
         self.assertEqual(VALIDATOR.REQUIRED_SECTIONS, USER_VALIDATOR.REQUIRED_SECTIONS)

@@ -47,7 +47,7 @@ def normalized_guidance(line: str) -> str | None:
     if not value or value.startswith(("#", "```", "**Abstraction level:**")):
         return None
     words = re.findall(r"[a-z0-9]+", value.lower())
-    return " ".join(words) if len(words) >= 6 else None
+    return " ".join(words) if words else None
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
@@ -97,27 +97,38 @@ def validate(path: Path) -> list[str]:
     if not re.search(r"^# .+", body, re.MULTILINE):
         errors.append("missing skill title")
 
-    section_indexes: list[tuple[str, int]] = []
-    for section in SECTION_ORDER:
-        index = body.find(section)
-        if index == -1 and section in REQUIRED_SECTIONS:
+    heading_matches = list(re.finditer(r"^## [^\n]+$", body, re.MULTILINE))
+    section_matches = [
+        (match.group(0), match.start(), match.end(), position)
+        for position, match in enumerate(heading_matches)
+        if match.group(0) in SECTION_ORDER
+    ]
+    section_counts = {
+        section: sum(match[0] == section for match in section_matches)
+        for section in SECTION_ORDER
+    }
+    for section in REQUIRED_SECTIONS:
+        if section_counts[section] == 0:
             errors.append(f"missing section: {section}")
-        elif index != -1:
-            section_indexes.append((section, index))
-    section_indexes.sort(key=lambda item: item[1])
+    for section, count in section_counts.items():
+        if count > 1:
+            errors.append(f"duplicate section: {section}")
+
     expected_positions = {section: position for position, section in enumerate(SECTION_ORDER)}
-    for previous, current in zip(section_indexes, section_indexes[1:]):
+    for previous, current in zip(section_matches, section_matches[1:]):
         if expected_positions[current[0]] < expected_positions[previous[0]]:
             errors.append(f"section is out of order: {current[0]}")
 
     repeated_guidance: dict[str, str] = {}
-    for position, (section, start) in enumerate(section_indexes):
-        end = section_indexes[position + 1][1] if position + 1 < len(section_indexes) else len(body)
-        content = body[start + len(section) : end].strip()
-        minimum_words = 12 if section == "## Policy (π)" else 4
-        word_count = len(content.split())
-        if word_count < minimum_words:
-            errors.append(f"section is too thin to execute: {section}")
+    for section, _start, content_start, heading_position in section_matches:
+        end = (
+            heading_matches[heading_position + 1].start()
+            if heading_position + 1 < len(heading_matches)
+            else len(body)
+        )
+        content = body[content_start:end].strip()
+        if not content:
+            errors.append(f"section is empty: {section}")
         for line in content.splitlines():
             normalized = normalized_guidance(line)
             if not normalized:
