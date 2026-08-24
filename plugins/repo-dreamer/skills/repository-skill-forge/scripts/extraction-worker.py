@@ -409,6 +409,7 @@ def run_checkpoint(
                 "terminalCoverageAttached": False,
                 "failed": True,
                 "reason": str(error)[:400],
+                "findingDiagnostics": {},
             },
         )
     return publish_checkpoint(
@@ -418,6 +419,7 @@ def run_checkpoint(
             "processedBatchCount": len(summary["processedBatchIds"]),
             "terminalCoverageAttached": bool(summary["terminalCoverageAttached"]),
             "failed": False,
+            "findingDiagnostics": summary.get("findingDiagnostics", {}),
         },
     )
 
