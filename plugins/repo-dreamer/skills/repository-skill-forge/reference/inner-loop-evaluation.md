@@ -66,6 +66,67 @@ proposed skill directory.
 
 ## Execute actions
 
+Provision the exact packaged Vally version once in the isolated run directory:
+
+```bash
+mkdir -p "$RUN_DIR/vally-runtime"
+cp "$SKILL_DIR/assets/vally/package.json" "$RUN_DIR/vally-runtime/package.json"
+npm install \
+  --prefix "$RUN_DIR/vally-runtime" \
+  --package-lock=false \
+  --no-audit \
+  --no-fund
+VALLY_CLI="$RUN_DIR/vally-runtime/node_modules/.bin/vally"
+```
+
+Do not use a floating global Vally version. The worker rejects versions other
+than `0.14.0` because its JSONL parser targets that published wire contract.
+
+For a complete machine-driven run, invoke:
+
+```bash
+python3 "$SKILL_DIR/scripts/run-proposal-evaluation.py" \
+  --state "$RUN_DIR/proposals/$PROPOSAL_KEY/evaluation-state.json" \
+  --repository "$REPOSITORY_DIR" \
+  --workspace-root "$RUN_DIR/proposals/$PROPOSAL_KEY/isolated-workspaces" \
+  --vally-cli "$VALLY_CLI" \
+  --model "$EVAL_MODEL" \
+  --judge-model "$EVAL_JUDGE_MODEL" \
+  --copilot-home "$HOME/.copilot" \
+  --allow-host-execution \
+  --revision-command "$REVISION_COMMAND" \
+  --proposal "$PROPOSAL_JSON" \
+  --summary "$RUN_DIR/proposals/$PROPOSAL_KEY/evaluation-summary.json"
+```
+
+`REVISION_COMMAND` is a non-shell command template supplied by the host. It may
+use `{action}`, `{output}`, `{current_skill}`, `{iteration}`, and
+`{revision_dir}` placeholders. It must write:
+
+```json
+{"skillPath": "/absolute/path/to/revised-skill/SKILL.md"}
+```
+
+The worker validates that skill and derives `proposalVersion` from its complete
+file tree. If no approved revision command is available, the worker blocks
+instead of pretending the loop completed.
+
+The worker removes secret-like environment variables before launching Vally or
+the revision command. A required variable must be explicitly forwarded with
+`--allow-env NAME`. Prefer Copilot credential-store authentication over
+agent-readable token environment variables.
+
+Vally 0.14 provides only its local backend. `--allow-host-execution` is an
+explicit acknowledgement that trials run with the caller's host permissions;
+without it the worker blocks. Use it only in an approved disposable or otherwise
+contained environment. `--copilot-home` copies only `config.json` into a fresh
+per-action directory so login works without loading persisted MCP, permission,
+hook, extension, or skill settings. Credentials remain in the OS credential
+store.
+
+The lower-level action interface remains available for hosts that perform
+revision through an agent API rather than a command:
+
 Request one action at a time:
 
 ```bash

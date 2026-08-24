@@ -447,6 +447,19 @@
             "meanWallTimeMs": { "type": "number", "minimum": 0 }
           },
           "additionalProperties": false
+        },
+        "provenance": {
+          "type": "object",
+          "properties": {
+            "actionId": { "type": "string" },
+            "arm": { "enum": ["baseline", "treatment"] },
+            "split": { "enum": ["development", "heldout"] },
+            "model": { "type": ["string", "null"] },
+            "judgeModel": { "type": ["string", "null"] },
+            "vallyExitCode": { "type": "integer" },
+            "resultsPath": { "type": "string" }
+          },
+          "additionalProperties": false
         }
       },
       "additionalProperties": false
@@ -486,7 +499,9 @@
           "additionalProperties": false
         },
         "thresholds": { "type": "object" },
-        "assessment": { "type": ["object", "null"] }
+        "assessment": { "type": ["object", "null"] },
+        "vallyVersion": { "type": ["string", "null"] },
+        "actionsRun": { "type": "integer", "minimum": 0 }
       },
       "additionalProperties": false
     },

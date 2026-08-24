@@ -1,0 +1,10 @@
+{
+  "name": "repository-skill-forge-vally-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Pinned Vally runtime for repository-skill-forge proposal evaluation",
+  "dependencies": {
+    "@microsoft/vally": "0.14.0",
+    "@microsoft/vally-cli": "0.14.0"
+  }
+}

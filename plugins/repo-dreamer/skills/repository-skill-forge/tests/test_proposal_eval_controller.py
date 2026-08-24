@@ -116,6 +116,20 @@ class ProposalEvalControllerTests(unittest.TestCase):
                 {name: len(values) for name, values in state["splits"].items()},
             )
 
+    def test_generated_vally_spec_uses_stimulus_rubric(self) -> None:
+        with tempfile.TemporaryDirectory() as run_dir:
+            state = self.initialize(run_dir)
+            spec = json.loads(
+                Path(state["evalSpecs"]["development"]).read_text(encoding="utf-8")
+            )
+
+            self.assertIn("rubric", spec["stimuli"][0])
+            self.assertNotIn(
+                "rubric",
+                spec["stimuli"][0]["graders"][0]["config"],
+            )
+            self.assertEqual(0.8, spec["scoring"]["threshold"])
+
     def test_failed_development_result_requests_revision(self) -> None:
         with tempfile.TemporaryDirectory() as run_dir:
             state = self.initialize(run_dir)

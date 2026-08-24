@@ -114,13 +114,14 @@ def vally_spec(
         stimulus: dict[str, Any] = {
             "name": case["caseId"],
             "prompt": case["prompt"],
+            "rubric": case["rubric"],
             "tags": {"session_hash": case["sessionHash"], "split": split},
             "graders": [
                 {
                     "type": "prompt",
                     "config": {
-                        "rubric": case["rubric"],
-                        "threshold": 1.0,
+                        "scoring": "scale_1_5",
+                        "threshold": 0.8,
                     },
                 }
             ],
@@ -133,6 +134,7 @@ def vally_spec(
         "type": "capability",
         "defaults": {"runs": runs},
         "stimuli": stimuli,
+        "scoring": {"threshold": 0.8},
     }
 
 

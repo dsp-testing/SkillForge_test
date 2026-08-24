@@ -16,6 +16,7 @@ Use this skill only when:
 
 - `session_store_sql` supports repository-scoped queries for the target;
 - Python 3.10 or later is available;
+- Node.js 22 or later and npm are available for the pinned Vally runtime;
 - GitHub reads and writes use approved GitHub MCP tools;
 - the run has an isolated scratch directory outside the checkout.
 
@@ -321,6 +322,10 @@ sanitized, repository-grounded evaluation cases. Follow
 separates authoring, development, and held-out sessions, runs a fixed baseline,
 and permits at most three treatment revisions. Development failures may revise
 the proposal. Held-out failures reject it and must never feed another revision.
+Use `run-proposal-evaluation.py` for the complete action loop when the host can
+provide an approved revision command. Otherwise execute the same controller
+actions through isolated evaluation and revision agents; do not manually
+calculate scores from console output.
 
 The same Vally spec, model, checkout, permissions, and runtime configuration
 must be used for both arms. Baseline loads no proposed skill. Treatment loads
@@ -520,8 +525,14 @@ tool-call, output, context, or automation limit.
   and one-mutation selection.
 - `scripts/proposal-eval-controller.py`: deterministic session partitioning,
   Vally action sequencing, metric gates, and bounded revision decisions.
+- `scripts/run-proposal-evaluation.py`: pinned-version Vally execution, secret
+  environment filtering, normalized result recording, and revision-command
+  orchestration through terminal status.
+- `scripts/vally_results.py`: strict Vally 0.14 trial-result normalization and
+  missing-trial rejection.
 - `scripts/validate-publication.py`: final PR-body, clean-checkout,
   selected-path, content-equality, and leakage validation.
+- `assets/vally/package.json`: exact Vally runtime dependency versions.
 - `reference/inner-loop-evaluation.md`: session-grounded case construction,
   Vally result normalization, revision isolation, and acceptance procedure.
 - `prompts/revise-proposal.md`: development-failure-driven proposal revision
