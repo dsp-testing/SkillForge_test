@@ -85,11 +85,17 @@ def cleanup_raw_artifacts(
 def assert_sanitized_invariants(sanitized: dict[str, Any], batch_id: str) -> None:
     """Defense-in-depth check that the sanitizer actually produced a safe document.
 
-    A secret-shaped finding is never batch-fatal on its own: the sanitizer
-    already strips raw evidence and deterministically redacts every command
-    template before this function runs. This only guards against the
-    sanitizer itself regressing, so a genuine safety-invariant failure still
-    blocks the batch instead of silently promoting an unsafe document.
+    An *advisory* finding (currently only `assigned_secret`) is never
+    batch-fatal on its own: the sanitizer already strips raw evidence and
+    deterministically redacts every command template and signature before
+    this function runs. A *blocking* finding (a concrete credential shape
+    such as `github_token`, `aws_access_key`, `private_key`, or
+    `bearer_token`) is handled separately in `checkpoint` and always fails
+    the batch, regardless of what this function finds.
+
+    This function only guards against the sanitizer itself regressing, so a
+    genuine safety-invariant failure still blocks the batch instead of
+    silently promoting an unsafe document.
     """
     sanitization = sanitized.get("sanitization")
     if not isinstance(sanitization, dict) or sanitization.get("rawSourceContentRetained") is not False:
@@ -110,6 +116,23 @@ def assert_sanitized_invariants(sanitized: dict[str, Any], batch_id: str) -> Non
             raise ValueError(
                 f"completed batch {batch_id} sanitized primitive failed the source-content invariant"
             )
+
+    # Content-safety backstop: recursively scan every string in the
+    # sanitized document for a surviving TOKEN_PATTERNS match. This must
+    # never fire in practice once redaction is correct; it exists to catch a
+    # future field that gets sanitized independently of the rest of the
+    # document (the exact shape of the `signature.tokens` regression this
+    # guards against) rather than derived from already-redacted content. It
+    # is not a substitute for `redact()` consuming an entire sensitive span
+    # (for example a multi-line PEM body): a regex that matches only part of
+    # a secret would let this scan pass even though the value it does not
+    # cover remains raw.
+    leaked_kinds = sanitizer.token_pattern_matches(sanitized)
+    if leaked_kinds:
+        raise ValueError(
+            f"completed batch {batch_id} sanitized document still contains a "
+            f"matched pattern ({sorted(set(leaked_kinds))})"
+        )
 
 
 def checkpoint(
@@ -210,12 +233,20 @@ def checkpoint(
         )
         write_json(sanitized_path, sanitized)
         write_json(report_path, report)
+
+        # A blocking finding (a concrete credential shape: github_token,
+        # aws_access_key, private_key, bearer_token) still fails the batch
+        # closed. Only an advisory finding (assigned_secret, the heuristic
+        # responsible for false positives) is promotable, and only once the
+        # document below passes every remaining safety invariant.
+        if report.get("blockingFindingCount"):
+            raise ValueError(f"completed batch {batch_id} contains blocking leakage")
         assert_sanitized_invariants(sanitized, batch_id)
 
-        # A secret-shaped finding does not abort the batch: the document
-        # above already satisfies the safety invariants, so record the
-        # counts and kinds as diagnostics (never the matched text) and keep
-        # promoting the safe sanitized primitives.
+        # An advisory finding does not abort the batch: the document above
+        # already satisfies the safety invariants, so record the counts and
+        # kinds as diagnostics (never the matched text) and keep promoting
+        # the safe sanitized primitives.
         finding_count += int(report.get("findingCount") or 0)
         blocking_finding_count += int(report.get("blockingFindingCount") or 0)
         advisory_finding_count += int(report.get("advisoryFindingCount") or 0)
