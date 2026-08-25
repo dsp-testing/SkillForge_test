@@ -166,7 +166,14 @@ controller state; it is not a second state machine.
 - `partitions`: total, discovery complete, pending discovery, omitted
 - `coverage`: session coverage and its known or unknown status, fallback count
 - `checkpoint`: the latest checkpoint summary, written by the worker to
-  `$RUN_DIR/checkpoint-summary.json` on every `advance`
+  `$RUN_DIR/checkpoint-summary.json` on every `advance`. It includes a
+  `findingDiagnostics` object (`findingCount`, `blockingFindingCount`,
+  `advisoryFindingCount`, `findingsByKind`, `batchesWithFindings`) reporting
+  any *advisory* secret-shaped findings (`assigned_secret`) from the batches
+  most recently checkpointed, by count and kind only, never the matched
+  text. A *blocking* finding (a concrete credential shape) always fails the
+  batch closed instead of being promoted, so `blockingFindingCount` in a
+  returned summary is always `0`.
 - `blocker` and `blockerCount`
 
 ## Testing this plugin branch from a cloud agent run

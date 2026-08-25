@@ -182,9 +182,32 @@ raw artifacts, and attaches final extraction coverage once the controller is
 terminal. A checkpoint failure becomes a terminal controller blocker so it can
 never be mistaken for unfinished `running` extraction.
 
+An **advisory** finding in a batch's sanitizer report (currently only
+`assigned_secret`, the assignment-shape heuristic responsible for false
+positives such as computed references, environment lookups, and dotted
+identifiers) is never batch-fatal by itself: `sanitize-evidence.py` already
+strips `rawEvidence` and deterministically redacts every command template and
+signature before the checkpoint promotes the batch, so an advisory finding
+does not change what reaches the ledger. A **blocking** finding (a concrete
+credential shape: `github_token`, `aws_access_key`, `private_key`, or
+`bearer_token`) still fails the batch closed every time, regardless of
+whether the document was otherwise redacted correctly: the intended change is
+that an advisory finding does not abort later batches, not that a genuine
+credential shape becomes promotable. Checkpointing records finding counts and
+kinds as diagnostics, never the matched text, and additionally blocks a batch
+when the sanitizer fails outright, an artifact is malformed, or the sanitized
+document itself fails a safety invariant (retained raw content, a primitive
+that still carries `rawEvidence`, or a TOKEN_PATTERNS match surviving
+anywhere in the final sanitized document).
+
 Each checkpoint is also written to `$RUN_DIR/checkpoint-summary.json`, so the
 run marker's diagnostic snapshot reports current checkpoint coverage rather than
-model recollection.
+model recollection. That summary includes a `findingDiagnostics` object with
+`findingCount`, `blockingFindingCount`, `advisoryFindingCount`,
+`findingsByKind`, and `batchesWithFindings` for the batches processed by that
+checkpoint call. `blockingFindingCount` in a *returned* summary is always `0`,
+since a batch with a blocking finding never returns; its presence there
+exists only for schema consistency.
 
 Immediately before any final response, publication decision, or run-directory
 cleanup, require:

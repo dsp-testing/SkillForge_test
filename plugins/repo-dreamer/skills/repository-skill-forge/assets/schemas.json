@@ -202,7 +202,8 @@
             "processedBatchCount": { "type": "integer", "minimum": 0 },
             "terminalCoverageAttached": { "type": "boolean" },
             "failed": { "type": "boolean" },
-            "reason": { "type": "string" }
+            "reason": { "type": "string" },
+            "findingDiagnostics": { "type": ["object", "null"] }
           },
           "additionalProperties": false
         },

@@ -31,7 +31,14 @@ block for in-flight tool results, and both accept `--events-root` and `--out`.
 3. Records outcomes through the controller: successes first, then terminal
    failures, always in issued-action order rather than completion order.
 4. Checkpoints every newly completed batch, converting checkpoint failure into
-   a terminal controller blocker.
+   a terminal controller blocker. Checkpointing sanitizes the batch and
+   promotes it when the sanitizer reports only an *advisory* finding
+   (`assigned_secret`); an advisory finding is recorded as a diagnostic
+   (count and kind, never the matched text) rather than aborting the batch.
+   A *blocking* finding (`github_token`, `aws_access_key`, `private_key`, or
+   `bearer_token`) still fails the batch closed every time. A sanitizer
+   execution failure, a malformed artifact, or a violated safety invariant
+   in the sanitized document also blocks a batch.
 5. Generates the next bounded wave, records the tool calls already completed
    for each of its actions, then finalizes, re-checkpoints to attach terminal
    coverage, and asserts terminal status when no actions remain.
