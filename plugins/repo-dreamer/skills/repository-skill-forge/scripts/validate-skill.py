@@ -17,17 +17,60 @@ REQUIRED_SECTIONS = (
     "## Interface (R)",
     "## Policy (π)",
     "## Termination (T)",
+    "## Assets and scripts",
+    "## Scope boundaries",
+)
+OPTIONAL_SECTIONS = (
     "## Always do",
     "## Never do",
     "## Gotchas / edge cases",
+)
+SECTION_ORDER = (
+    "## Purpose",
+    "## Conditions (C)",
+    "## Interface (R)",
+    "## Policy (π)",
+    "## Termination (T)",
+    *OPTIONAL_SECTIONS,
     "## Assets and scripts",
     "## Scope boundaries",
 )
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+ACTIVATION_RE = re.compile(
+    r"\b(?:use|load|invoke|apply)(?:\s+this\s+skill)?\s+"
+    r"(?:when|whenever|for)\b\s+(?=[^.\n]*[a-z0-9`])",
+    re.IGNORECASE,
+)
 ABSTRACTION_RE = re.compile(
     r"\*\*Abstraction level:\*\*\s*(primitive|compositional|strategic)\b",
     re.IGNORECASE,
 )
+
+
+def normalized_guidance(line: str) -> str | None:
+    value = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", line.strip())
+    if not value or value.startswith(("#", "```", "**Abstraction level:**")):
+        return None
+    words = re.findall(r"[a-z0-9]+", value.lower())
+    return " ".join(words) if words else None
+
+
+def markdown_headings(text: str) -> list[re.Match[str]]:
+    headings: list[re.Match[str]] = []
+    fence: str | None = None
+    for match in re.finditer(r"^.*$", text, re.MULTILINE):
+        line = match.group(0)
+        fence_match = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if fence_match:
+            marker = fence_match.group(1)
+            if fence is None:
+                fence = marker
+            elif marker[0] == fence[0] and len(marker) >= len(fence):
+                fence = None
+            continue
+        if fence is None and re.fullmatch(r"## [^\n]+", line):
+            headings.append(match)
+    return headings
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
@@ -70,28 +113,57 @@ def validate(path: Path) -> list[str]:
         errors.append(f"name must match parent directory: expected {path.parent.name}")
     if frontmatter.get("generated-by") != "forge-agent":
         errors.append("generated-by must be forge-agent")
+    description = frontmatter.get("description", "")
+    if description and not 1 <= len(description) <= 1024:
+        errors.append("description must contain 1-1024 characters")
+    if description and not ACTIVATION_RE.search(description):
+        errors.append("description must state when the skill should load")
     if not re.search(r"^# .+", body, re.MULTILINE):
         errors.append("missing skill title")
 
-    previous = -1
-    section_indexes: list[tuple[str, int]] = []
+    heading_matches = markdown_headings(body)
+    section_matches = [
+        (match.group(0), match.start(), match.end(), position)
+        for position, match in enumerate(heading_matches)
+        if match.group(0) in SECTION_ORDER
+    ]
+    section_counts = {
+        section: sum(match[0] == section for match in section_matches)
+        for section in SECTION_ORDER
+    }
     for section in REQUIRED_SECTIONS:
-        index = body.find(section)
-        if index == -1:
+        if section_counts[section] == 0:
             errors.append(f"missing section: {section}")
-            continue
-        if index < previous:
-            errors.append(f"section is out of order: {section}")
-        previous = index
-        section_indexes.append((section, index))
-    for position, (section, start) in enumerate(section_indexes):
-        end = section_indexes[position + 1][1] if position + 1 < len(section_indexes) else len(body)
-        content = body[start + len(section) : end].strip()
-        minimum_words = 12 if section == "## Policy (π)" else 4
-        if len(content.split()) < minimum_words:
-            errors.append(f"section is too thin to execute: {section}")
-    if len(body.split()) > 5000:
-        errors.append("skill body exceeds the 5000-token approximation")
+    for section, count in section_counts.items():
+        if count > 1:
+            errors.append(f"duplicate section: {section}")
+
+    expected_positions = {section: position for position, section in enumerate(SECTION_ORDER)}
+    for previous, current in zip(section_matches, section_matches[1:]):
+        if expected_positions[current[0]] < expected_positions[previous[0]]:
+            errors.append(f"section is out of order: {current[0]}")
+
+    repeated_guidance: dict[str, str] = {}
+    for section, _start, content_start, heading_position in section_matches:
+        end = (
+            heading_matches[heading_position + 1].start()
+            if heading_position + 1 < len(heading_matches)
+            else len(body)
+        )
+        content = body[content_start:end].strip()
+        guidance = [(line, normalized_guidance(line)) for line in content.splitlines()]
+        if not any(normalized for _line, normalized in guidance):
+            errors.append(f"section is empty: {section}")
+        for line, normalized in guidance:
+            if not normalized:
+                continue
+            first_section = repeated_guidance.get(normalized)
+            if first_section and first_section != section:
+                errors.append(
+                    f"guidance is repeated in {first_section} and {section}: {line.strip()}"
+                )
+            else:
+                repeated_guidance[normalized] = section
     if not ABSTRACTION_RE.search(body):
         errors.append("missing abstraction level: primitive, compositional, or strategic")
     return errors

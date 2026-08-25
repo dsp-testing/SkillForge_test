@@ -298,14 +298,26 @@ Assign deterministic non-negative `rank` values.
 
 Validate and independently review every proposal. Compare it with repository
 skills and the complete Forge PR catalog. Store each promoted proposal's marker
-with that proposal rather than in a shared run-level file:
+with that proposal rather than in a shared run-level file. Set
+`GENERATED_SKILL_PATH` to the exact run-local `SKILL.md` authored for the
+proposal before running:
 
 ```bash
+python3 "$SKILL_DIR/scripts/validate-skill.py" \
+  "$GENERATED_SKILL_PATH" \
+  --json
+
+python3 "$SKILL_DIR/scripts/validate-proposal.py" \
+  "$PROPOSAL_JSON" \
+  --json
+
 python3 "$SKILL_DIR/scripts/proposal-ledger.py" marker \
   --proposal "$PROPOSAL_JSON" \
   --out "$RUN_DIR/proposals/$PROPOSAL_KEY/proposal-marker.md"
 ```
 
+Both validators must pass after independent review and before marker generation.
+Do not promote or publish a proposal whose description review is incomplete.
 The marker is persistent PR metadata. Do not edit or remove it when updating a
 PR. It lets later stateless runs distinguish unchanged, revised, rejected,
 open, and merged proposals without an issue ledger.

@@ -1088,6 +1088,8 @@ class ExtractionControllerTests(unittest.TestCase):
                 "unresolvedConflictCount": 0,
                 "executable": True,
                 "branchSpecific": False,
+                "concise": True,
+                "nonRedundant": True,
             },
             "publication": {
                 "duplicate": False,
@@ -1098,6 +1100,37 @@ class ExtractionControllerTests(unittest.TestCase):
         }
 
         self.assertEqual([], validator.validate(document))
+        review_requirements = {
+            "concise": "proposed skill is not concise",
+            "nonRedundant": "proposed skill repeats guidance",
+        }
+        for field, expected_error in review_requirements.items():
+            with self.subTest(field=field):
+                document["review"][field] = False
+                self.assertIn(expected_error, validator.validate(document))
+                document["review"][field] = True
+
+        document["review"]["descriptionHasActivationCriteria"] = False
+        document["review"]["descriptionStatesOutcome"] = False
+        document["review"]["descriptionCoversNecessaryTriggers"] = False
+        self.assertEqual([], validator.validate(document))
+
+        document["decision"] = "create_skill"
+        document["skillPath"] = "skills/partial-discovery"
+        description_requirements = {
+            "descriptionHasActivationCriteria": "skill description lacks activation criteria",
+            "descriptionStatesOutcome": "skill description lacks a concrete outcome",
+            "descriptionCoversNecessaryTriggers": (
+                "skill description omits necessary activation criteria"
+            ),
+        }
+        for field, expected_error in description_requirements.items():
+            with self.subTest(field=field):
+                document["review"].update(
+                    {requirement: True for requirement in description_requirements}
+                )
+                document["review"][field] = False
+                self.assertIn(expected_error, validator.validate(document))
 
 if __name__ == "__main__":
     unittest.main()

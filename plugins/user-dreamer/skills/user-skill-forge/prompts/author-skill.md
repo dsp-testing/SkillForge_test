@@ -38,25 +38,32 @@ For `hold_as_pattern_only`, do not change repository skill files.
 Every created or changed skill must:
 
 - use a kebab-case directory and matching frontmatter `name`;
-- include a concise description stating what it does and when to use it;
+- include a concise description that answers both "When should this skill
+  load?" and "What does it help accomplish?" in either order, using explicit
+  activation language without requiring a fixed sentence template;
+- include every activation criterion needed to select the skill correctly in
+  the description, while leaving operational prerequisites and execution
+  details that matter only after loading in Conditions or the body;
 - include `generated-by: forge-agent`;
 - declare `**Abstraction level:** primitive|compositional|strategic`;
-- encode these sections in order:
+- encode these required sections in order:
     1. `# <Skill Title>`
     2. `## Purpose`
     3. `## Conditions (C)`
     4. `## Interface (R)`
     5. `## Policy (π)`
     6. `## Termination (T)`
-    7. `## Always do`
-    8. `## Never do`
-    9. `## Gotchas / edge cases`
-    10. `## Assets and scripts`
-    11. `## Scope boundaries`
+    7. `## Assets and scripts`
+    8. `## Scope boundaries`
 
-Keep the body operational and below approximately 5000 tokens. Move reusable
-executable logic into `scripts/` only when it is generalizable, parameterized,
-and independently verifiable. Move bulky templates and examples into `assets/`.
+Add `## Always do`, `## Never do`, or `## Gotchas / edge cases` between
+Termination and Assets only when they add unique operational guidance. Do not
+create filler sections or restate triggers, requirements, commands, boundaries,
+or success conditions already captured elsewhere.
+
+Keep Policy focused on the ordered workflow. Move reusable executable logic
+into `scripts/` only when it is generalizable, parameterized, and independently
+verifiable. Move bulky templates and examples into `assets/`.
 
 ## Evidence ledger
 
@@ -82,13 +89,16 @@ part of C/R/π/T cannot be grounded, record the gap and avoid inventing it.
 
 Before choosing create, improve, or merge:
 
-1. Simulate activation from only the proposed description and Conditions.
+1. Simulate activation from only the proposed description. Confirm it states
+   the capability or outcome and every criterion needed for correct selection;
+   no necessary trigger may appear only in Conditions or the body.
 2. Confirm a fresh agent can follow Interface and Policy without the source transcript.
 3. Confirm Termination distinguishes success from failure and gives a recovery action.
 4. Compare the proposed result with the source evidence and preserve exact values.
 5. Check nearby skills for trigger overlap, contradictory policy, and lost behavior.
 6. For improvement or merge, identify the baseline behavior that must remain unchanged.
 7. For domain-specific examples, preserve structure but derive values from the current task.
+8. Remove repeated guidance and any section that adds no unique operational value.
 
 If the first validation fails, revise once. If the revised skill still fails,
 remove only the invalid Forge change and use `hold_as_pattern_only`.

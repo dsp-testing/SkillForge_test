@@ -38,10 +38,29 @@ workflow as parameterized instructions and preserve exact commands only when
 they are repository-stable, non-secret, and independently corroborated by
 default-branch files or multiple sanitized evidence records.
 
+Keep generated skills concise:
+
+- require Purpose, Conditions, Interface, Policy, Termination, Assets and
+  scripts, and Scope boundaries, but add Always do, Never do, or Gotchas /
+  edge cases only when the section contributes unique operational guidance;
+- state each trigger, requirement, command, boundary, and success condition
+  once in the most appropriate section instead of paraphrasing it elsewhere;
+- keep Policy focused on the ordered workflow and move bulky examples,
+  templates, or reusable logic into assets or scripts.
+
 For a promoted proposal:
 
 - write under `$RUN_DIR/proposals/<proposal-key>/<skill-name>/SKILL.md`;
 - include `generated-by: forge-agent`;
+- make the frontmatter description answer both "When should this skill load?"
+  and "What does it help accomplish?" in either order and without requiring a
+  fixed sentence template;
+- use explicit activation language such as `Use when`, `Use for`, `Load when`,
+  or an equivalent phrase, and state a concrete capability or outcome rather
+  than repeating the skill name;
+- include every activation criterion needed to select the skill correctly.
+  Keep operational prerequisites and execution details that matter only after
+  loading in Conditions or the body;
 - include the required C/R/pi/T sections accepted by `validate-skill.py`;
 - cite candidate IDs and repository artifacts in the proposal summary, not in
   generated instructions where they would distract future execution;
