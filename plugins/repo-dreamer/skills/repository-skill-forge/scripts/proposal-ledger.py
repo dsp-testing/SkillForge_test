@@ -10,6 +10,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from forge_common import read_json, write_json
 
@@ -85,20 +86,59 @@ def pr_status(pr: dict[str, Any]) -> str:
     raise ValueError("PR state must be open or closed")
 
 
-def build_catalog(prs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def repository_from_url(value: str) -> str | None:
+    parsed = urlparse(value)
+    parts = [part for part in parsed.path.split("/") if part]
+    if parsed.netloc.lower() == "api.github.com" and parts[:1] == ["repos"]:
+        parts = parts[1:]
+    if len(parts) >= 2:
+        return "/".join(parts[:2])
+    return None
+
+
+def pr_repository(pr: dict[str, Any]) -> str | None:
+    repository = pr.get("repository")
+    if isinstance(repository, str) and repository:
+        return repository
+    if isinstance(repository, dict):
+        for key in ("nameWithOwner", "name_with_owner", "full_name"):
+            value = repository.get(key)
+            if isinstance(value, str) and value:
+                return value
+    for key in ("repositoryWithOwner", "repository_url", "url", "html_url"):
+        value = pr.get(key)
+        if isinstance(value, str) and value:
+            parsed = repository_from_url(value)
+            if parsed:
+                return parsed
+    return None
+
+
+def build_catalog(
+    prs: list[dict[str, Any]], repository: str
+) -> list[dict[str, Any]]:
     catalog: list[dict[str, Any]] = []
     for pr in prs:
         if not isinstance(pr, dict):
             raise ValueError("PR catalog input must contain objects")
+        actual_repository = pr_repository(pr)
+        if (
+            actual_repository is not None
+            and actual_repository.lower() != repository.lower()
+        ):
+            continue
         marker = parse_marker(str(pr.get("body") or ""))
         if marker is None:
             continue
+        if actual_repository is None:
+            raise ValueError("marked PR requires repository identity")
         number = pr.get("number")
         if not isinstance(number, int) or number < 1:
             raise ValueError("marked PR requires a positive number")
         catalog.append(
             {
                 **marker,
+                "repository": actual_repository,
                 "number": number,
                 "url": str(pr.get("url") or pr.get("html_url") or ""),
                 "status": pr_status(pr),
@@ -240,6 +280,7 @@ def main() -> None:
 
     catalog_command = subcommands.add_parser("catalog")
     catalog_command.add_argument("--prs", required=True, type=Path)
+    catalog_command.add_argument("--repository", required=True)
     catalog_command.add_argument("--out", required=True, type=Path)
 
     check_command = subcommands.add_parser("check")
@@ -268,7 +309,7 @@ def main() -> None:
             prs = read_json(args.prs)
             if not isinstance(prs, list):
                 raise ValueError("PR input must be an array")
-            write_json(args.out, build_catalog(prs))
+            write_json(args.out, build_catalog(prs, args.repository))
             return
         catalog = read_json(args.catalog)
         if not isinstance(catalog, list) or any(
