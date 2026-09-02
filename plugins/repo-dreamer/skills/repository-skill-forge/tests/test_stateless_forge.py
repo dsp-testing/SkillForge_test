@@ -156,15 +156,27 @@ class ProposalMarkerTests(unittest.TestCase):
         body = ledger.render_marker(proposal())
         catalog = ledger.build_catalog(
             [
-                {"number": 1, "state": "OPEN", "body": body},
-                {"number": 2, "state": "CLOSED", "body": body},
                 {
+                    "repository": {"nameWithOwner": "owner/repository"},
+                    "number": 1,
+                    "state": "OPEN",
+                    "body": body,
+                },
+                {
+                    "repository": {"nameWithOwner": "owner/repository"},
+                    "number": 2,
+                    "state": "CLOSED",
+                    "body": body,
+                },
+                {
+                    "repository": {"nameWithOwner": "owner/repository"},
                     "number": 3,
                     "state": "CLOSED",
                     "mergedAt": "2026-08-15T00:00:00Z",
                     "body": body,
                 },
-            ]
+            ],
+            "owner/repository",
         )
 
         self.assertEqual(["open", "closed", "merged"], [item["status"] for item in catalog])
@@ -173,10 +185,50 @@ class ProposalMarkerTests(unittest.TestCase):
         body = ledger.render_marker(proposal())
 
         catalog = ledger.build_catalog(
-            [{"number": 1, "state": "MERGED", "body": body}]
+            [
+                {
+                    "repository": {"nameWithOwner": "owner/repository"},
+                    "number": 1,
+                    "state": "MERGED",
+                    "body": body,
+                }
+            ],
+            "owner/repository",
         )
 
         self.assertEqual("merged", catalog[0]["status"])
+
+    def test_catalog_filters_foreign_repository_prs_before_marker_parsing(self) -> None:
+        body = ledger.render_marker(proposal())
+
+        catalog = ledger.build_catalog(
+            [
+                {
+                    "repository": {"nameWithOwner": "other/repository"},
+                    "number": 1,
+                    "state": "MERGED",
+                    "body": f"{body}\n{body}",
+                },
+                {
+                    "url": "https://github.com/owner/repository/pull/2",
+                    "number": 2,
+                    "state": "OPEN",
+                    "body": body,
+                },
+            ],
+            "owner/repository",
+        )
+
+        self.assertEqual([2], [item["number"] for item in catalog])
+
+    def test_catalog_rejects_marked_pr_without_repository_identity(self) -> None:
+        body = ledger.render_marker(proposal())
+
+        with self.assertRaisesRegex(ValueError, "repository identity"):
+            ledger.build_catalog(
+                [{"number": 1, "state": "OPEN", "body": body}],
+                "owner/repository",
+            )
 
     def test_duplicate_markers_are_rejected(self) -> None:
         marker = ledger.render_marker(proposal())

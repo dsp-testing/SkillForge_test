@@ -61,25 +61,31 @@ into the checkout, and never carries evidence across runs. See
 Use the exact fixed rolling window for every run. Do not derive it from an
 issue, a previous run, or the last published PR.
 
-Search open and closed pull requests for the literal
-`repository-skill-forge-proposal:v1` marker, regardless of labels. Request at
-least PR number, URL, state, draft status, merged timestamp, updated timestamp,
-and complete body for every match. Also use general PR search when evaluating a
-candidate to find semantically related work that predates the marker or was not
-created by Forge. Labels are optional organizational metadata and are never an
-identity, discovery, deduplication, or blocking mechanism.
+Search open and closed pull requests in the exact target repository for the
+literal `repository-skill-forge-proposal:v1` marker, regardless of labels. The
+search query must include the target `repo:owner/name` qualifier. Request at
+least repository identity, PR number, URL, state, draft status, merged
+timestamp, updated timestamp, and complete body for every match. Also scope
+general PR search to the exact target repository when evaluating a candidate
+to find semantically related work that predates the marker or was not created
+by Forge. Ignore pull requests in all other repositories. Labels are optional
+organizational metadata and are never an identity, discovery, deduplication, or
+blocking mechanism.
 
 Write the returned PR array to `$RUN_DIR/forge-prs.json`, then build the catalog:
 
 ```bash
 python3 "$SKILL_DIR/scripts/proposal-ledger.py" catalog \
   --prs "$RUN_DIR/forge-prs.json" \
+  --repository "$REPOSITORY" \
   --out "$RUN_DIR/proposal-catalog.json"
 ```
 
 Only PRs containing one valid `repository-skill-forge-proposal:v1` marker enter
-the catalog. A malformed or duplicate marker is an explicit integration error;
-never guess its identity.
+the catalog. The catalog builder independently verifies repository identity and
+filters foreign-repository results as defense in depth. A marked PR without
+repository identity, or a malformed or duplicate marker, is an explicit
+integration error; never guess its identity.
 
 Read default-branch repository content through GitHub MCP by omitting the
 optional `ref`. Exact target branch and SHA are needed only if a proposal is
