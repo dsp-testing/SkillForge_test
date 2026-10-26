@@ -26,9 +26,7 @@ full diagnostic snapshot, including the marker summary and controller counters,
 is written to stderr as a single JSON line. Pass `--quiet` to suppress it.
 
 `reason` and `continuePrompt` are bounded (`--max-reason-chars`, default 1200;
-`--max-prompt-chars`, default 2400). Pending action IDs appear early in both
-strings, and blocker fields are reproduced verbatim, so truncation never removes
-the actionable detail.
+`--max-prompt-chars`, default 2400).
 
 ## Stable command
 
@@ -124,10 +122,7 @@ The predicate is deterministic and side-effect free. All writes happen in
 
 The worker checkpoints in process and writes its summary to
 `$RUN_DIR/checkpoint-summary.json`, so `refresh` reports current checkpoint
-coverage in the snapshot's `checkpoint` field. Because the worker owns the
-extraction loop, every `incomplete` `continuePrompt` steers the agent back into
-`extraction-worker.py advance` rather than into raw controller commands: calling
-`session_store_sql` outside a worker wave is forbidden.
+coverage in the snapshot's `checkpoint` field.
 
 `clear` refuses to run while the marker phase is still `active`, so the marker
 cannot be removed before terminal assertion. There is deliberately no override
