@@ -256,8 +256,7 @@ Tool-event fallback is opt-in. With
 `enableToolEventFallback=false`, timed-out post-discovery units are omitted
 without an identical retry or page-size reduction when partial mode is enabled.
 
-When enabled, fallback applies only to a failed tool unit and never queries
-outside the fixed window. Exact-session metadata remains authoritative from
+Exact-session metadata remains authoritative from
 `sessions`; timed-out references and files are omitted rather than retried with
 smaller limits.
 
@@ -324,9 +323,8 @@ python3 "$SKILL_DIR/scripts/proposal-ledger.py" marker \
 
 Both validators must pass after independent review and before marker generation.
 Do not promote or publish a proposal whose description review is incomplete.
-The marker is persistent PR metadata. Do not edit or remove it when updating a
-PR. It lets later stateless runs distinguish unchanged, revised, rejected,
-open, and merged proposals without an issue ledger.
+The marker is persistent PR metadata. It lets later stateless runs distinguish
+unchanged, revised, rejected, open, and merged proposals without an issue ledger.
 
 ### 6. Reconcile and publish at most one proposal
 
